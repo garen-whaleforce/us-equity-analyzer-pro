@@ -1,0 +1,19 @@
+{
+  "name": "us-equity-analyzer-pro",
+  "version": "2.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file=.env server.js",
+    "start": "node server.js",
+    "test:self": "node scripts/selftest.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "dayjs": "^1.11.13",
+    "express": "^4.21.2",
+    "morgan": "^1.10.0",
+    "turndown": "^7.2.0",
+    "node-fetch": "^3.3.2",
+    "qs": "^6.13.0"
+  }
+}
