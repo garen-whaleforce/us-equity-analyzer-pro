@@ -1,6 +1,6 @@
 {
   "name": "us-equity-analyzer-pro",
-  "version": "2.0.0",
+  "version": "2.2.0",
   "type": "module",
   "scripts": {
     "dev": "node --env-file=.env server.js",
@@ -14,6 +14,9 @@
     "morgan": "^1.10.0",
     "turndown": "^7.2.0",
     "node-fetch": "^3.3.2",
-    "qs": "^6.13.0"
+    "qs": "^6.13.0",
+    "multer": "^1.4.5-lts.1",
+    "papaparse": "^5.4.1",
+    "xlsx": "^0.18.5"
   }
 }

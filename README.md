@@ -42,11 +42,17 @@ curl -s -X POST http://localhost:5000/api/analyze \
 
 本次實測（2025-11-08）關鍵輸出：
 
-- `quote.c = 188.15`（Finnhub 現價）
+- `quote.c = 188.15`（若輸入日期為未來或當日即取即時價；若為過去則依序使用 Finnhub / AlphaVantage / Yahoo 取得歷史收盤價）
 - `price_target.targetMean = 229.67`（AlphaVantage 均價，系統已自動補齊高低區間）
 - `analysis.action.rating = BUY`、`target_price = 225`、`stop_loss = 165`
 
 前端頁面同時會顯示財報時間線、雷達圖與 ChatGPT 總結，可用瀏覽器打開 `http://localhost:5000` 驗證。
+
+## 批次分析（Excel / CSV）
+
+- 前端頁面底部的「批次分析」工作列可直接上傳 Excel/CSV；第一欄為 `ticker`，第二欄為 `date`（`YYYY-MM-DD`），遇到空白列即停止。
+- 伺服器會依序執行與 `/api/analyze` 相同的流程，並輸出 CSV，欄位為：Ticker、Date、現價、分析師平均/共識目標價、ChatGPT 總結目標價、建議。
+- 後端同時提供 `POST /api/batch`，multipart field 名稱為 `file`，可自動取得產出的 CSV。
 
 ## 部署到 Zeabur
 
