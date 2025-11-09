@@ -214,6 +214,16 @@ function formatPct(value){
   return `${(value*100).toFixed(1)}%`;
 }
 
+function normalizeInputDate(raw){
+  if(!raw) return '';
+  const replaced = raw.replace(/\//g,'-');
+  const direct = dayjs(replaced);
+  if(direct.isValid()) return direct.format('YYYY-MM-DD');
+  const alt = dayjs(new Date(raw));
+  if(alt.isValid()) return alt.format('YYYY-MM-DD');
+  return replaced;
+}
+
 function setKPIs(quote, pt, priceMeta, action, profile, news, momentum){
   const last = toNum(priceMeta?.value ?? quote?.c);
   const targets = ensureTargets(pt, last);
@@ -329,10 +339,6 @@ function renderHistory(){
   }).join('');
 }
 
-renderNews(null);
-renderMomentum(null);
-renderHistory();
-
 function renderProfile(profile){
   const summaryEl = document.getElementById('profileSummary');
   const detailEl = document.getElementById('profileDetail');
@@ -386,18 +392,22 @@ const goBtn = document.getElementById('go');
 const stopBtn = document.getElementById('stop');
 const modelSelect = document.getElementById('model');
 const defaultModel = modelSelect?.value || 'gpt-5';
-const newsSentimentEl = document.getElementById('newsSentiment');
-const newsSummaryEl = document.getElementById('newsSummary');
-const newsArticlesEl = document.getElementById('newsArticles');
-const historyListEl = document.getElementById('historyList');
 const momentumScoreEl = document.getElementById('momentumScore');
 const trendFlagEl = document.getElementById('trendFlag');
 const momentumSummaryEl = document.getElementById('momentumSummary');
 const momentumDetailEl = document.getElementById('momentumDetail');
+const newsSentimentEl = document.getElementById('newsSentiment');
+const newsSummaryEl = document.getElementById('newsSummary');
+const newsArticlesEl = document.getElementById('newsArticles');
+const historyListEl = document.getElementById('historyList');
 const analyzeLabel = goBtn?.textContent || '分析';
 let inFlightController = null;
 let userAborted = false;
 const analysisHistory = [];
+
+renderNews(null);
+renderMomentum(null);
+renderHistory();
 
 function setStatus(text, state='idle'){
   statusEl.textContent = text;
@@ -433,7 +443,12 @@ async function analyze(){
     return;
   }
   const ticker = document.getElementById('t').value.trim().toUpperCase();
-  const date   = document.getElementById('d').value.trim();
+  const dateInput = document.getElementById('d');
+  const rawDate = dateInput.value.trim();
+  const date   = normalizeInputDate(rawDate);
+  if(rawDate && date !== rawDate && dateInput){
+    dateInput.value = date;
+  }
   const model  = (modelSelect?.value || defaultModel).trim() || defaultModel;
   if(!ticker || !date){
     setStatus('請先輸入 Ticker 與 Date。', 'error');
