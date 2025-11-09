@@ -194,9 +194,11 @@ function parseBatchFile(file){
     if(!row || !row.length) continue;
     const ticker = String(row[0] ?? '').trim();
     const date = normalizeDate(row[1]);
+    const model = String(row[2] ?? '').trim();
+    if(/^(ticker|symbol)$/i.test(ticker) && /^date$/i.test(String(row[1] || ''))) continue;
     if(!ticker && !date) break;
     if(!ticker || !date) continue;
-    tasks.push({ ticker, date });
+    tasks.push({ ticker, date, model });
   }
   return tasks;
 }
@@ -217,11 +219,12 @@ app.post('/api/batch', upload.single('file'), async (req,res)=>{
     if(!tasks.length) return res.status(400).json({error:'檔案內沒有有效的 ticker/date 列'});
     const memo = new Map();
     const rows = await mapWithConcurrency(tasks, BATCH_CONCURRENCY, async (task)=>{
-      const key = `${task.ticker.toUpperCase()}__${task.date}`;
+      const resolvedModel = resolveModelName(task.model);
+      const key = `${task.ticker.toUpperCase()}__${task.date}__${resolvedModel}`;
       if(!memo.has(key)){
         memo.set(key, (async ()=>{
           try{
-            const result = await performAnalysis(task.ticker, task.date, { model: MODEL });
+            const result = await performAnalysis(task.ticker, task.date, { model: resolvedModel });
             return { ok:true, result };
           }catch(error){
             return { ok:false, error };
@@ -233,24 +236,31 @@ app.post('/api/batch', upload.single('file'), async (req,res)=>{
         return {
           ticker: task.ticker.toUpperCase(),
           date: task.date,
+          model: resolvedModel,
           current_price: '',
           analyst_mean_target: '',
           llm_target_price: '',
-          recommendation: `ERROR: ${outcome.error.message}`
+          recommendation: `ERROR: ${outcome.error.message}`,
+          segment: '',
+          quality_score: ''
         };
       }
       const result = outcome.result;
       const summary = result.fetched?.finnhub_summary || {};
+      const profile = result.analysis?.profile;
       return {
         ticker: result.input.ticker,
         date: task.date,
+        model: resolvedModel,
         current_price: summary.quote?.c ?? '',
         analyst_mean_target: summary.price_target?.targetMean ?? summary.price_target?.targetMedian ?? '',
         llm_target_price: result.analysis?.action?.target_price ?? '',
-        recommendation: result.analysis?.action?.rating ?? ''
+        recommendation: result.analysis?.action?.rating ?? '',
+        segment: profile?.segment_label || profile?.segment || '',
+        quality_score: profile?.score ?? ''
       };
     });
-    const fields = ['ticker','date','current_price','analyst_mean_target','llm_target_price','recommendation'];
+    const fields = ['ticker','date','model','current_price','analyst_mean_target','llm_target_price','recommendation','segment','quality_score'];
     const csv = Papa.unparse({
       fields,
       data: rows.map(r=>fields.map(f=>r[f]))
