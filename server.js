@@ -13,6 +13,7 @@ import { getRecommendations, getEarnings, getQuote } from './lib/finnhub.js';
 import { getAggregatedPriceTarget } from './lib/pricetarget.js';
 import { analyzeWithLLM } from './lib/llm.js';
 import { getHistoricalPrice } from './lib/historicalPrice.js';
+import { getCachedAnalysis, saveAnalysisResult } from './lib/analysisStore.js';
 
 const app = express();
 app.use(express.json());
@@ -29,6 +30,8 @@ const OPEN_KEY= process.env.OPENROUTER_KEY || '';
 const MODEL   = process.env.OPENROUTER_MODEL || 'gpt-5';
 const BATCH_CONCURRENCY = Math.max(1, Number(process.env.BATCH_CONCURRENCY || 3));
 const upload = multer({ storage: multer.memoryStorage(), limits:{ fileSize: 10 * 1024 * 1024 } });
+const REALTIME_TTL_MS = 6 * 60 * 60 * 1000;
+const HISTORICAL_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 function errRes(res, err){ console.error('❌', err); return res.status(500).json({error:String(err.message||err)}); }
 
@@ -54,6 +57,12 @@ async function performAnalysis(ticker, date){
   const baselineDate = parsedDate.format('YYYY-MM-DD');
   const upperTicker = ticker.toUpperCase();
   const isHistorical = parsedDate.isBefore(dayjs(), 'day');
+  const analysisTtl = isHistorical ? HISTORICAL_TTL_MS : REALTIME_TTL_MS;
+
+  const cachedResult = getCachedAnalysis({ ticker: upperTicker, baselineDate, ttlMs: analysisTtl });
+  if(cachedResult){
+    return cachedResult;
+  }
 
   const cik = await getCIK(upperTicker, UA, SEC_KEY);
   const filings = await getRecentFilings(cik, baselineDate, UA, SEC_KEY);
@@ -118,10 +127,10 @@ async function performAnalysis(ticker, date){
     })),
     finnhub: { recommendation:finnhub.recommendation, earnings:finnhub.earnings, quote:finnhub.quote, price_target: ptAgg }
   };
-  const llmTtlMs = isHistorical ? 30 * 24 * 60 * 60 * 1000 : 6 * 60 * 60 * 1000;
+  const llmTtlMs = analysisTtl;
   const llm = await analyzeWithLLM(OPEN_KEY, MODEL, payload, { cacheTtlMs: llmTtlMs, promptVersion: 'profile_v1' });
 
-  return {
+  const result = {
     input:{ticker:upperTicker, date: baselineDate},
     fetched:{
       filings: filings.map(f=>({form:f.form, form_label:f.formLabel || f.form, filingDate:f.filingDate, reportDate:f.reportDate, url:f.url})),
@@ -134,6 +143,8 @@ async function performAnalysis(ticker, date){
     },
     analysis: llm
   };
+  saveAnalysisResult({ ticker: upperTicker, baselineDate, isHistorical, result });
+  return result;
 }
 
 function normalizeDate(raw){
