@@ -23,6 +23,7 @@ const UA   = process.env.SEC_USER_AGENT || 'App/1.0 (email@example.com)';
 const SEC_KEY = process.env.SEC_API_KEY || '';
 const FH_KEY  = process.env.FINNHUB_KEY || '';
 const AV_KEY  = process.env.ALPHAVANTAGE_KEY || '';
+const TWELVE_KEY = process.env.TWELVE_DATA_KEY || '';
 const OPEN_KEY= process.env.OPENROUTER_KEY || '';
 const MODEL   = process.env.OPENROUTER_MODEL || 'gpt-5';
 const upload = multer({ storage: multer.memoryStorage(), limits:{ fileSize: 10 * 1024 * 1024 } });
@@ -62,7 +63,11 @@ async function performAnalysis(ticker, date){
   };
   if(isHistorical){
     try{
-      const hist = await getHistoricalPrice(upperTicker, baselineDate, { finnhubKey: FH_KEY, alphaKey: AV_KEY });
+      const hist = await getHistoricalPrice(upperTicker, baselineDate, {
+        finnhubKey: FH_KEY,
+        alphaKey: AV_KEY,
+        twelveKey: TWELVE_KEY
+      });
       if(hist?.price!=null){
         current = hist.price;
         priceMeta.source = hist.source;

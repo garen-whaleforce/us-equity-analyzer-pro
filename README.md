@@ -12,6 +12,7 @@
 - 推薦 API key：
   - `SEC_API_KEY`：提升 SEC API 速率
   - `ALPHAVANTAGE_KEY`：Price Target 第三層備援
+  - `TWELVE_DATA_KEY`：Twelve Data 歷史價格第四層備援
 
 ## 安裝與啟動
 
@@ -66,8 +67,9 @@ curl -s -X POST http://localhost:5000/api/analyze \
    - `PORT=3000`（Zeabur 會自動指定，保留即可）
    - `SEC_USER_AGENT=...`
    - `SEC_API_KEY=...`
-   - `FINNHUB_KEY=...`
-   - `ALPHAVANTAGE_KEY=...`（如有）
+  - `FINNHUB_KEY=...`
+  - `ALPHAVANTAGE_KEY=...`（如有）
+  - `TWELVE_DATA_KEY=...`（如有）
    - `OPENROUTER_KEY=...`
    - `OPENROUTER_MODEL=gpt-5`
 4. 部署完成後，Zeabur 會提供公開 URL，即可透過瀏覽器使用。
