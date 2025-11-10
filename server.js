@@ -13,7 +13,7 @@ import { getRecommendations, getEarnings, getQuote } from './lib/finnhub.js';
 import { getAggregatedPriceTarget } from './lib/pricetarget.js';
 import { analyzeWithLLM } from './lib/llm.js';
 import { getHistoricalPrice } from './lib/historicalPrice.js';
-import { getCachedAnalysis, saveAnalysisResult, deleteAnalysis } from './lib/analysisStore.js';
+import { getCachedAnalysis, saveAnalysisResult, deleteAnalysis, getStoredResult } from './lib/analysisStore.js';
 import { buildNewsBundle } from './lib/news.js';
 import { computeMomentumMetrics } from './lib/momentum.js';
 import { getFmpQuote } from './lib/fmp.js';
@@ -41,6 +41,8 @@ const REALTIME_TTL_MS = 6 * 60 * 60 * 1000;
 const HISTORICAL_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const FILING_SUMMARY_TTL_MS = 180 * DAY_MS;
+const RETRY_ATTEMPTS = Number(process.env.API_RETRY_ATTEMPTS || 3);
+const RETRY_DELAY_MS = Number(process.env.API_RETRY_DELAY_MS || 1500);
 
 function resolveModelName(){
   return OPENAI_MODEL;
@@ -64,6 +66,39 @@ function newsCompactCacheKey(ticker, baselineDate, model){
 
 function momentumCacheKey(ticker, baselineDate){
   return `momentum_compact_${ticker}_${baselineDate}`;
+}
+
+function sleep(ms){
+  return new Promise(resolve=>setTimeout(resolve, ms));
+}
+
+function isRetryableError(err){
+  if(!err) return false;
+  const status = err.response?.status;
+  if(status && (status === 408 || status === 429 || status >= 500)) return true;
+  const code = err.code;
+  if(['ECONNRESET','ETIMEDOUT','ECONNABORTED','ENETUNREACH','EAI_AGAIN'].includes(code)) return true;
+  const msg = err.message || '';
+  return /timeout|socket hang up|temporarily unavailable/i.test(msg);
+}
+
+async function withRetries(task, attempts=RETRY_ATTEMPTS, delayMs=RETRY_DELAY_MS){
+  let lastErr;
+  for(let attempt=1; attempt<=Math.max(1, attempts); attempt++){
+    try{
+      return await task();
+    }catch(err){
+      lastErr = err;
+      if(attempt === attempts || !isRetryableError(err)) throw err;
+      await sleep(delayMs * attempt);
+    }
+  }
+  throw lastErr;
+}
+
+function findStoredFiling(storedList, form, filingDate){
+  if(!Array.isArray(storedList)) return null;
+  return storedList.find(item=> item.form === form && item.filingDate === filingDate);
 }
 
 function compactRecommendation(reco){
@@ -199,10 +234,16 @@ async function performAnalysis(ticker, date, opts={}){
   if(cachedResult){
     return cachedResult;
   }
+  const storedResult = getStoredResult({ ticker: upperTicker, baselineDate, model: llmModel });
 
   const cik = await getCIK(upperTicker, UA, SEC_KEY);
   const filings = await getRecentFilings(cik, baselineDate, UA, SEC_KEY);
+  const storedSecFilings = storedResult?.inputs?.sec_filings;
   const perFiling = await mapWithConcurrency(filings, 3, async (f)=>{
+    const stored = findStoredFiling(storedSecFilings, f.form, f.filingDate);
+    if(stored?.mda_summary){
+      return stored;
+    }
     const cacheKey = filingSummaryCacheKey(upperTicker, f.form, f.filingDate);
     const cached = await readCache(cacheKey, FILING_SUMMARY_TTL_MS);
     if(cached?.mda_summary){
@@ -222,7 +263,7 @@ async function performAnalysis(ticker, date, opts={}){
     }catch(err){
       console.warn('[MDA Summary]', err.message);
     }
-    const excerpt = mda.slice(0, 600);
+    const excerpt = mda.slice(0, 400);
     const snapshot = {
       form:f.form,
       formLabel:f.formLabel,
@@ -237,13 +278,13 @@ async function performAnalysis(ticker, date, opts={}){
 
   const cacheContext = baselineDate;
   const finnhubCacheKey = finnhubSnapshotCacheKey(upperTicker, baselineDate);
-  let finnhubSnapshot = await readCache(finnhubCacheKey, analysisTtl);
+  let finnhubSnapshot = storedResult?.inputs?.finnhub || await readCache(finnhubCacheKey, analysisTtl);
 
   if(!finnhubSnapshot){
     const [recoRes, earnRes, quoteRes] = await Promise.allSettled([
-      getRecommendations(upperTicker, FH_KEY, cacheContext),
-      getEarnings(upperTicker, FH_KEY, cacheContext),
-      getQuote(upperTicker, FH_KEY, cacheContext)
+      withRetries(()=>getRecommendations(upperTicker, FH_KEY, cacheContext)),
+      withRetries(()=>getEarnings(upperTicker, FH_KEY, cacheContext)),
+      withRetries(()=>getQuote(upperTicker, FH_KEY, cacheContext))
     ]);
     const finnhub = {
       recommendation: recoRes.status==='fulfilled'?recoRes.value:{ error:recoRes.reason.message },
@@ -260,11 +301,11 @@ async function performAnalysis(ticker, date, opts={}){
 
     if(isHistorical){
       try{
-        const hist = await getHistoricalPrice(upperTicker, baselineDate, {
-          fmpKey: FMP_KEY,
-          finnhubKey: FH_KEY,
-          alphaKey: AV_KEY,
-        });
+      const hist = await withRetries(()=>getHistoricalPrice(upperTicker, baselineDate, {
+        fmpKey: FMP_KEY,
+        finnhubKey: FH_KEY,
+        alphaKey: AV_KEY,
+      }), 2, RETRY_DELAY_MS);
         if(hist?.price!=null){
           current = hist.price;
           priceMeta.source = hist.source;
@@ -278,7 +319,7 @@ async function performAnalysis(ticker, date, opts={}){
     }else{
       if(FMP_KEY){
         try{
-          const quote = await getFmpQuote(upperTicker, FMP_KEY);
+      const quote = await withRetries(()=>getFmpQuote(upperTicker, FMP_KEY));
           current = quote.price;
           priceMeta.source = 'fmp_quote';
           if(quote.asOf) priceMeta.as_of = quote.asOf;
@@ -286,7 +327,7 @@ async function performAnalysis(ticker, date, opts={}){
       }
       if(current==null){
         try{
-          const yahoo = await getYahooQuote(upperTicker);
+      const yahoo = await withRetries(()=>getYahooQuote(upperTicker));
           current = yahoo.price;
           priceMeta.source = yahoo.source;
           if(yahoo.asOf) priceMeta.as_of = yahoo.asOf;
@@ -300,7 +341,7 @@ async function performAnalysis(ticker, date, opts={}){
 
     if(current==null && FMP_KEY){
       try{
-        const quote = await getFmpQuote(upperTicker, FMP_KEY);
+        const quote = await withRetries(()=>getFmpQuote(upperTicker, FMP_KEY));
         current = quote.price;
         priceMeta.source = 'fmp_quote';
         priceMeta.as_of = quote.asOf || priceMeta.as_of;
@@ -309,7 +350,7 @@ async function performAnalysis(ticker, date, opts={}){
     }
     if(current==null){
       try{
-        const yahoo = await getYahooQuote(upperTicker);
+        const yahoo = await withRetries(()=>getYahooQuote(upperTicker));
         current = yahoo.price;
         priceMeta.source = yahoo.source;
         priceMeta.as_of = yahoo.asOf || priceMeta.as_of;
@@ -378,7 +419,7 @@ async function performAnalysis(ticker, date, opts={}){
   };
 
   const newsCacheKey = newsCompactCacheKey(upperTicker, baselineDate, secondaryModel);
-  let newsCompact = await readCache(newsCacheKey, analysisTtl);
+  let newsCompact = storedResult?.inputs?.news || await readCache(newsCacheKey, analysisTtl);
   if(!newsCompact){
     const newsRaw = await buildNewsBundle({ ticker: upperTicker, baselineDate, openKey: OPENAI_KEY, model: secondaryModel });
     newsCompact = compactNewsBundle(newsRaw);
@@ -387,7 +428,7 @@ async function performAnalysis(ticker, date, opts={}){
   payload.news = newsCompact;
 
   const momentumKey = momentumCacheKey(upperTicker, baselineDate);
-  let momentum = await readCache(momentumKey, analysisTtl);
+  let momentum = storedResult?.inputs?.momentum || await readCache(momentumKey, analysisTtl);
   if(!momentum){
     const momentumRaw = await computeMomentumMetrics(upperTicker, baselineDate);
     momentum = compactMomentum(momentumRaw);
@@ -408,7 +449,13 @@ async function performAnalysis(ticker, date, opts={}){
     llm_usage: llmUsage,
     analysis_model: llmModel,
     news: newsCompact,
-    momentum
+    momentum,
+    inputs:{
+      sec_filings: perFiling,
+      finnhub: finnhubSnapshot,
+      news: newsCompact,
+      momentum
+    }
   };
   saveAnalysisResult({ ticker: upperTicker, baselineDate, isHistorical, model: llmModel, result });
   return result;
