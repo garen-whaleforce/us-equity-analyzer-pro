@@ -9,7 +9,7 @@
   - `SEC_USER_AGENT`：SEC 強制要求，可填 `YourApp/1.0 (email@example.com)`
   - `FINNHUB_KEY`：取得推薦 / 財報 / 報價（作為 FMP 失敗時的備援）
   - `FMP_API_KEY`：Financial Modeling Prep Pro，優先提供即時價、歷史價、動能序列與分析師目標價
-  - `OPENAI_API_KEY`：呼叫 LLM（預設模型 `gpt-4o-mini`，可用 `OPENAI_MODEL` 覆寫）
+  - `OPENAI_API_KEY`：呼叫 LLM（預設模型 `gpt-5`，可用 `OPENAI_MODEL` 覆寫）
 - 推薦 API key：
   - `SEC_API_KEY`：提升 SEC API 速率
   - `ALPHAVANTAGE_KEY`：Price Target / 歷史價第三層備援
@@ -71,7 +71,7 @@ curl -s -X POST http://localhost:5000/api/analyze \
   - `FMP_API_KEY=...`
   - `ALPHAVANTAGE_KEY=...`（如有）
   - `OPENAI_API_KEY=...`
-  - `OPENAI_MODEL=gpt-4o-mini`
+  - `OPENAI_MODEL=gpt-5`
 4. 部署完成後，Zeabur 會提供公開 URL，即可透過瀏覽器使用。
 
 ## 有用腳本
