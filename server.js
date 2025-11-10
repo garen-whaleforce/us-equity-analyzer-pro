@@ -18,7 +18,7 @@ import { buildNewsBundle } from './lib/news.js';
 import { computeMomentumMetrics } from './lib/momentum.js';
 import { getFmpQuote } from './lib/fmp.js';
 import { getYahooQuote } from './lib/yahoo.js';
-import { clearCacheForTicker } from './lib/cache.js';
+import { clearCacheForTicker, getCache as readCache, setCache as writeCache } from './lib/cache.js';
 import { summarizeMda } from './lib/mdaSummarizer.js';
 
 const app = express();
@@ -39,6 +39,8 @@ const BATCH_CONCURRENCY = Math.max(1, Number(process.env.BATCH_CONCURRENCY || 3)
 const upload = multer({ storage: multer.memoryStorage(), limits:{ fileSize: 10 * 1024 * 1024 } });
 const REALTIME_TTL_MS = 6 * 60 * 60 * 1000;
 const HISTORICAL_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const FILING_SUMMARY_TTL_MS = 180 * DAY_MS;
 
 function resolveModelName(){
   return OPENAI_MODEL;
@@ -46,6 +48,22 @@ function resolveModelName(){
 
 function resolveSecondaryModel(){
   return OPENAI_SECONDARY_MODEL;
+}
+
+function filingSummaryCacheKey(ticker, form, filingDate){
+  return `filing_summary_${ticker}_${form}_${filingDate}`;
+}
+
+function finnhubSnapshotCacheKey(ticker, baselineDate){
+  return `finnhub_snapshot_${ticker}_${baselineDate}`;
+}
+
+function newsCompactCacheKey(ticker, baselineDate, model){
+  return `news_compact_${ticker}_${baselineDate}_${model}`;
+}
+
+function momentumCacheKey(ticker, baselineDate){
+  return `momentum_compact_${ticker}_${baselineDate}`;
 }
 
 function compactRecommendation(reco){
@@ -185,6 +203,18 @@ async function performAnalysis(ticker, date, opts={}){
   const cik = await getCIK(upperTicker, UA, SEC_KEY);
   const filings = await getRecentFilings(cik, baselineDate, UA, SEC_KEY);
   const perFiling = await mapWithConcurrency(filings, 3, async (f)=>{
+    const cacheKey = filingSummaryCacheKey(upperTicker, f.form, f.filingDate);
+    const cached = await readCache(cacheKey, FILING_SUMMARY_TTL_MS);
+    if(cached?.mda_summary){
+      return {
+        form:f.form,
+        formLabel:f.formLabel,
+        filingDate:f.filingDate,
+        reportDate:f.reportDate,
+        mda_summary: cached.mda_summary,
+        mda_excerpt: cached.mda_excerpt
+      };
+    }
     const mda = await fetchMDA(f.url, UA);
     let summary = mda.slice(0, 1200);
     try{
@@ -192,123 +222,145 @@ async function performAnalysis(ticker, date, opts={}){
     }catch(err){
       console.warn('[MDA Summary]', err.message);
     }
-    return {
+    const excerpt = mda.slice(0, 600);
+    const snapshot = {
       form:f.form,
       formLabel:f.formLabel,
       filingDate:f.filingDate,
       reportDate:f.reportDate,
       mda_summary: summary,
-      mda_excerpt: mda.slice(0,1500)
+      mda_excerpt: excerpt
     };
+    await writeCache(cacheKey, { mda_summary: summary, mda_excerpt: excerpt, form:f.form, ticker: upperTicker });
+    return snapshot;
   });
 
   const cacheContext = baselineDate;
-  const [recoRes, earnRes, quoteRes] = await Promise.allSettled([
-    getRecommendations(upperTicker, FH_KEY, cacheContext),
-    getEarnings(upperTicker, FH_KEY, cacheContext),
-    getQuote(upperTicker, FH_KEY, cacheContext)
-  ]);
-  const finnhub = {
-    recommendation: recoRes.status==='fulfilled'?recoRes.value:{ error:recoRes.reason.message },
-    earnings:       earnRes.status==='fulfilled'?earnRes.value:{ error:earnRes.reason.message },
-    quote:          quoteRes.status==='fulfilled'?quoteRes.value:{ error:quoteRes.reason.message }
-  };
-  let current = null;
-  const priceMeta = {
-    source: isHistorical ? 'historical_missing' : 'real-time_missing',
-    as_of: isHistorical ? baselineDate : dayjs().format('YYYY-MM-DD'),
-    kind: isHistorical ? 'historical' : 'real-time',
-    value: null
-  };
+  const finnhubCacheKey = finnhubSnapshotCacheKey(upperTicker, baselineDate);
+  let finnhubSnapshot = await readCache(finnhubCacheKey, analysisTtl);
 
-  if(isHistorical){
-    try{
-      const hist = await getHistoricalPrice(upperTicker, baselineDate, {
-        fmpKey: FMP_KEY,
-        finnhubKey: FH_KEY,
-        alphaKey: AV_KEY,
-      });
-      if(hist?.price!=null){
-        current = hist.price;
-        priceMeta.source = hist.source;
-        priceMeta.as_of = hist.date || baselineDate;
+  if(!finnhubSnapshot){
+    const [recoRes, earnRes, quoteRes] = await Promise.allSettled([
+      getRecommendations(upperTicker, FH_KEY, cacheContext),
+      getEarnings(upperTicker, FH_KEY, cacheContext),
+      getQuote(upperTicker, FH_KEY, cacheContext)
+    ]);
+    const finnhub = {
+      recommendation: recoRes.status==='fulfilled'?recoRes.value:{ error:recoRes.reason.message },
+      earnings:       earnRes.status==='fulfilled'?earnRes.value:{ error:earnRes.reason.message },
+      quote:          quoteRes.status==='fulfilled'?quoteRes.value:{ error:quoteRes.reason.message }
+    };
+    let current = null;
+    const priceMeta = {
+      source: isHistorical ? 'historical_missing' : 'real-time_missing',
+      as_of: isHistorical ? baselineDate : dayjs().format('YYYY-MM-DD'),
+      kind: isHistorical ? 'historical' : 'real-time',
+      value: null
+    };
+
+    if(isHistorical){
+      try{
+        const hist = await getHistoricalPrice(upperTicker, baselineDate, {
+          fmpKey: FMP_KEY,
+          finnhubKey: FH_KEY,
+          alphaKey: AV_KEY,
+        });
+        if(hist?.price!=null){
+          current = hist.price;
+          priceMeta.source = hist.source;
+          priceMeta.as_of = hist.date || baselineDate;
+        }
+      }catch(err){
+        console.warn('[HistoricalPrice]', err.message);
+        priceMeta.source = 'real-time_fallback';
+        priceMeta.kind = 'real-time';
       }
-    }catch(err){
-      console.warn('[HistoricalPrice]', err.message);
-      priceMeta.source = 'real-time_fallback';
+    }else{
+      if(FMP_KEY){
+        try{
+          const quote = await getFmpQuote(upperTicker, FMP_KEY);
+          current = quote.price;
+          priceMeta.source = 'fmp_quote';
+          if(quote.asOf) priceMeta.as_of = quote.asOf;
+        }catch(err){ console.warn('[FMP Quote]', err.message); }
+      }
+      if(current==null){
+        try{
+          const yahoo = await getYahooQuote(upperTicker);
+          current = yahoo.price;
+          priceMeta.source = yahoo.source;
+          if(yahoo.asOf) priceMeta.as_of = yahoo.asOf;
+        }catch(err){ console.warn('[Yahoo Quote]', err.message); }
+      }
+      if(current==null){
+        priceMeta.source = 'real-time_fallback';
+      }
       priceMeta.kind = 'real-time';
     }
-  }else{
-    if(FMP_KEY){
+
+    if(current==null && FMP_KEY){
       try{
         const quote = await getFmpQuote(upperTicker, FMP_KEY);
         current = quote.price;
         priceMeta.source = 'fmp_quote';
-        if(quote.asOf) priceMeta.as_of = quote.asOf;
-      }catch(err){ console.warn('[FMP Quote]', err.message); }
+        priceMeta.as_of = quote.asOf || priceMeta.as_of;
+        priceMeta.kind = 'real-time';
+      }catch(err){ console.warn('[FMP Quote fallback]', err.message); }
     }
     if(current==null){
       try{
         const yahoo = await getYahooQuote(upperTicker);
         current = yahoo.price;
         priceMeta.source = yahoo.source;
-        if(yahoo.asOf) priceMeta.as_of = yahoo.asOf;
-      }catch(err){ console.warn('[Yahoo Quote]', err.message); }
+        priceMeta.as_of = yahoo.asOf || priceMeta.as_of;
+        priceMeta.kind = 'real-time';
+      }catch(err){ console.warn('[Yahoo Quote fallback]', err.message); }
     }
-    if(current==null){
-      priceMeta.source = 'real-time_fallback';
+
+    priceMeta.value = current;
+    const quote = { ...(finnhub.quote || {}), c: current };
+
+    let ptAgg;
+    try{
+      ptAgg = await getAggregatedPriceTarget(upperTicker, FH_KEY, AV_KEY, current, FMP_KEY);
+    }catch(e){
+      ptAgg = {
+        source:'unavailable',
+        error:e.message,
+        targetHigh:null,
+        targetLow:null,
+        targetMean:null,
+        targetMedian:null
+      };
     }
-    priceMeta.kind = 'real-time';
-  }
 
-  if(current==null && FMP_KEY){
-    try{
-      const quote = await getFmpQuote(upperTicker, FMP_KEY);
-      current = quote.price;
-      priceMeta.source = 'fmp_quote';
-      priceMeta.as_of = quote.asOf || priceMeta.as_of;
-      priceMeta.kind = 'real-time';
-    }catch(err){ console.warn('[FMP Quote fallback]', err.message); }
-  }
-  if(current==null){
-    try{
-      const yahoo = await getYahooQuote(upperTicker);
-      current = yahoo.price;
-      priceMeta.source = yahoo.source;
-      priceMeta.as_of = yahoo.asOf || priceMeta.as_of;
-      priceMeta.kind = 'real-time';
-    }catch(err){ console.warn('[Yahoo Quote fallback]', err.message); }
-  }
-
-  priceMeta.value = current;
-  const quote = { ...(finnhub.quote || {}), c: current };
-  finnhub.quote = quote;
-  finnhub.price_meta = priceMeta;
-
-  let ptAgg;
-  try{
-    ptAgg = await getAggregatedPriceTarget(upperTicker, FH_KEY, AV_KEY, current, FMP_KEY);
-  }catch(e){
-    ptAgg = {
-      source:'unavailable',
-      error:e.message,
-      targetHigh:null,
-      targetLow:null,
-      targetMean:null,
-      targetMedian:null
+    finnhubSnapshot = {
+      recommendation: Array.isArray(finnhub.recommendation)
+        ? compactRecommendation(finnhub.recommendation)
+        : (finnhub.recommendation?.error ? { error: finnhub.recommendation.error } : null),
+      earnings: Array.isArray(finnhub.earnings)
+        ? compactEarningsRows(finnhub.earnings)
+        : (finnhub.earnings?.error ? { error: finnhub.earnings.error } : []),
+      quote: compactQuote(quote),
+      price_target: ptAgg,
+      price_meta: priceMeta
     };
+    await writeCache(finnhubCacheKey, finnhubSnapshot);
   }
 
-  const finnhubSnapshot = {
-    recommendation: Array.isArray(finnhub.recommendation)
-      ? compactRecommendation(finnhub.recommendation)
-      : (finnhub.recommendation?.error ? { error: finnhub.recommendation.error } : null),
-    earnings: Array.isArray(finnhub.earnings)
-      ? compactEarningsRows(finnhub.earnings)
-      : (finnhub.earnings?.error ? { error: finnhub.earnings.error } : []),
-    quote: compactQuote(finnhub.quote),
-    price_target: ptAgg,
-    price_meta: priceMeta
+  const priceMeta = finnhubSnapshot?.price_meta || {
+    source: isHistorical ? 'historical_missing' : 'real-time_missing',
+    as_of: isHistorical ? baselineDate : dayjs().format('YYYY-MM-DD'),
+    kind: isHistorical ? 'historical' : 'real-time',
+    value: finnhubSnapshot?.quote?.c ?? null
+  };
+  const ptAgg = finnhubSnapshot?.price_target || {
+    source:'unavailable',
+    error:'missing',
+    targetHigh:null,
+    targetLow:null,
+    targetMean:null,
+    targetMedian:null
   };
 
   const payload = {
@@ -325,11 +377,22 @@ async function performAnalysis(ticker, date, opts={}){
     finnhub: finnhubSnapshot
   };
 
-  const newsRaw = await buildNewsBundle({ ticker: upperTicker, baselineDate, openKey: OPENAI_KEY, model: secondaryModel });
-  const newsCompact = compactNewsBundle(newsRaw);
+  const newsCacheKey = newsCompactCacheKey(upperTicker, baselineDate, secondaryModel);
+  let newsCompact = await readCache(newsCacheKey, analysisTtl);
+  if(!newsCompact){
+    const newsRaw = await buildNewsBundle({ ticker: upperTicker, baselineDate, openKey: OPENAI_KEY, model: secondaryModel });
+    newsCompact = compactNewsBundle(newsRaw);
+    await writeCache(newsCacheKey, newsCompact);
+  }
   payload.news = newsCompact;
-  const momentumRaw = await computeMomentumMetrics(upperTicker, baselineDate);
-  const momentum = compactMomentum(momentumRaw);
+
+  const momentumKey = momentumCacheKey(upperTicker, baselineDate);
+  let momentum = await readCache(momentumKey, analysisTtl);
+  if(!momentum){
+    const momentumRaw = await computeMomentumMetrics(upperTicker, baselineDate);
+    momentum = compactMomentum(momentumRaw);
+    if(momentum) await writeCache(momentumKey, momentum);
+  }
   payload.momentum = momentum;
   const llmTtlMs = analysisTtl;
   const llm = await analyzeWithLLM(OPENAI_KEY, llmModel, payload, { cacheTtlMs: llmTtlMs, promptVersion: 'profile_v2' });

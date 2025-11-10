@@ -73,6 +73,8 @@ curl -s -X POST http://localhost:5000/api/analyze \
   - `OPENAI_API_KEY=...`
   - `OPENAI_MODEL=gpt-5`
   - `OPENAI_MODEL_SECONDARY=gpt-4o-mini`
+  - `OPENAI_GPT5_INPUT_COST_PER_TOKEN=...`（選填，USD/Token）
+  - `OPENAI_GPT5_OUTPUT_COST_PER_TOKEN=...`（選填，USD/Token）
 4. 部署完成後，Zeabur 會提供公開 URL，即可透過瀏覽器使用。
 
 ## 有用腳本
