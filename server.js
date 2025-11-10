@@ -16,6 +16,7 @@ import { getHistoricalPrice } from './lib/historicalPrice.js';
 import { getCachedAnalysis, saveAnalysisResult } from './lib/analysisStore.js';
 import { buildNewsBundle } from './lib/news.js';
 import { computeMomentumMetrics } from './lib/momentum.js';
+import { getFmpQuote } from './lib/fmp.js';
 
 const app = express();
 app.use(express.json());
@@ -28,6 +29,7 @@ const SEC_KEY = process.env.SEC_API_KEY || '';
 const FH_KEY  = process.env.FINNHUB_KEY || '';
 const AV_KEY  = process.env.ALPHAVANTAGE_KEY || '';
 const TWELVE_KEY = process.env.TWELVE_DATA_KEY || '';
+const FMP_KEY = process.env.FMP_API_KEY || process.env.FMP_KEY || '';
 const OPEN_KEY= process.env.OPENROUTER_KEY || '';
 const MODEL   = process.env.OPENROUTER_MODEL || 'gpt-5';
 const BATCH_CONCURRENCY = Math.max(1, Number(process.env.BATCH_CONCURRENCY || 3));
@@ -98,14 +100,18 @@ async function performAnalysis(ticker, date, opts={}){
     earnings:       earnRes.status==='fulfilled'?earnRes.value:{ error:earnRes.reason.message },
     quote:          quoteRes.status==='fulfilled'?quoteRes.value:{ error:quoteRes.reason.message }
   };
-  let current = finnhub?.quote?.c ?? null;
+  let current = null;
   const priceMeta = {
-    source: isHistorical ? 'historical_missing' : 'real-time',
-    as_of: isHistorical ? baselineDate : dayjs().format('YYYY-MM-DD')
+    source: isHistorical ? 'historical_missing' : 'real-time_missing',
+    as_of: isHistorical ? baselineDate : dayjs().format('YYYY-MM-DD'),
+    kind: isHistorical ? 'historical' : 'real-time',
+    value: null
   };
+
   if(isHistorical){
     try{
       const hist = await getHistoricalPrice(upperTicker, baselineDate, {
+        fmpKey: FMP_KEY,
         finnhubKey: FH_KEY,
         alphaKey: AV_KEY,
         twelveKey: TWELVE_KEY
@@ -113,22 +119,54 @@ async function performAnalysis(ticker, date, opts={}){
       if(hist?.price!=null){
         current = hist.price;
         priceMeta.source = hist.source;
+        priceMeta.as_of = hist.date || baselineDate;
       }
     }catch(err){
       console.warn('[HistoricalPrice]', err.message);
       priceMeta.source = 'real-time_fallback';
+      priceMeta.kind = 'real-time';
     }
   }else{
-    priceMeta.source = 'real-time';
+    if(FMP_KEY){
+      try{
+        const quote = await getFmpQuote(upperTicker, FMP_KEY);
+        current = quote.price;
+        priceMeta.source = 'fmp_quote';
+        if(quote.asOf) priceMeta.as_of = quote.asOf;
+      }catch(err){ console.warn('[FMP Quote]', err.message); }
+    }
+    if(current==null && finnhub?.quote?.c!=null){
+      current = finnhub.quote.c;
+      priceMeta.source = 'finnhub_quote';
+    }
+    if(current==null){
+      priceMeta.source = 'real-time_fallback';
+    }
+    priceMeta.kind = 'real-time';
   }
+
+  if(current==null && FMP_KEY){
+    try{
+      const quote = await getFmpQuote(upperTicker, FMP_KEY);
+      current = quote.price;
+      priceMeta.source = 'fmp_quote';
+      priceMeta.as_of = quote.asOf || priceMeta.as_of;
+      priceMeta.kind = 'real-time';
+    }catch(err){ console.warn('[FMP Quote fallback]', err.message); }
+  }
+  if(current==null && finnhub?.quote?.c!=null){
+    current = finnhub.quote.c;
+    priceMeta.source = 'finnhub_quote';
+    priceMeta.kind = 'real-time';
+  }
+
   priceMeta.value = current;
-  priceMeta.kind = isHistorical && priceMeta.source !== 'real-time' ? 'historical' : 'real-time';
   const quote = { ...(finnhub.quote || {}), c: current };
   finnhub.quote = quote;
   finnhub.price_meta = priceMeta;
 
   let ptAgg;
-  try{ ptAgg = await getAggregatedPriceTarget(upperTicker, FH_KEY, AV_KEY, current); }
+  try{ ptAgg = await getAggregatedPriceTarget(upperTicker, FH_KEY, AV_KEY, current, FMP_KEY); }
   catch(e){ ptAgg = { error:e.message }; }
 
   const payload = {
