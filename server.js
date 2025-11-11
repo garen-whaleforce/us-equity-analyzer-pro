@@ -237,31 +237,37 @@ function formatPercent(val, digits=1){
   return `${pct.toFixed(digits)}%`;
 }
 
-function summarizeInstitutionalRows(rows){
-  if(!Array.isArray(rows) || !rows.length) return null;
-  const normalized = rows
-    .map(row=>{
-      const name = row.investorname || row.investorName || row.holder || row.investor || '';
-      if(!name) return null;
-      const value = Number(row.value ?? row.marketValue ?? row.marketvalue ?? row.latestValue);
-      const weightRaw = Number(row.weightPercentage ?? row.weightPercent ?? row.weight ?? row.portfolioPercent);
-      const weight = Number.isFinite(weightRaw) ? (weightRaw > 1 ? weightRaw/100 : weightRaw) : null;
-      const changeShares = Number(row.change ?? row.changeInShares ?? row.changeShares ?? row.change_shares);
-      const reportDate = row.dateReported || row.latestQuarter || row.period || row.date;
-      const changePercent = Number(row.changePercent ?? row.changePercentage);
-      const shares = Number(row.shares ?? row.share);
-      return {
-        name,
-        value: Number.isFinite(value) ? value : null,
-        weight,
-        changeShares: Number.isFinite(changeShares) ? changeShares : 0,
-        changePercent: Number.isFinite(changePercent) ? changePercent : null,
-        reportDate,
-        shares: Number.isFinite(shares) ? shares : null
-      };
-    })
-    .filter(Boolean);
-  if(!normalized.length) return null;
+function summarizeInstitutionalRows(payload){
+  const rows = Array.isArray(payload)
+    ? payload
+    : (Array.isArray(payload?.holders) ? payload.holders : []);
+  const summaryMeta = !Array.isArray(payload) ? payload?.summary : null;
+  if((!rows || !rows.length) && !summaryMeta) return null;
+
+  const normalized = Array.isArray(rows)
+    ? rows
+        .map(row=>{
+          const name = row.investorname || row.investorName || row.holder || row.investor || '';
+          if(!name) return null;
+          const value = Number(row.value ?? row.marketValue ?? row.marketvalue ?? row.latestValue);
+          const weightRaw = Number(row.weightPercentage ?? row.weightPercent ?? row.weight ?? row.portfolioPercent);
+          const weight = Number.isFinite(weightRaw) ? (weightRaw > 1 ? weightRaw/100 : weightRaw) : null;
+          const changeShares = Number(row.change ?? row.changeInShares ?? row.changeShares ?? row.change_shares);
+          const reportDate = row.dateReported || row.latestQuarter || row.period || row.date;
+          const changePercent = Number(row.changePercent ?? row.changePercentage);
+          const shares = Number(row.shares ?? row.share);
+          return {
+            name,
+            value: Number.isFinite(value) ? value : null,
+            weight,
+            changeShares: Number.isFinite(changeShares) ? changeShares : 0,
+            changePercent: Number.isFinite(changePercent) ? changePercent : null,
+            reportDate,
+            shares: Number.isFinite(shares) ? shares : null
+          };
+        })
+        .filter(Boolean)
+    : [];
   normalized.sort((a,b)=> (b.value || 0) - (a.value || 0));
   const top = normalized.slice(0,5).map(item=>({
     name: item.name,
@@ -270,9 +276,12 @@ function summarizeInstitutionalRows(rows){
     change_shares: item.changeShares,
     change_percent: item.changePercent
   }));
-  const netShares = normalized.reduce((sum,item)=> sum + (item.changeShares || 0), 0);
+  const netSharesFromRows = normalized.reduce((sum,item)=> sum + (item.changeShares || 0), 0);
+  const netShares = Number.isFinite(Number(summaryMeta?.numberOf13FsharesChange))
+    ? Number(summaryMeta.numberOf13FsharesChange)
+    : netSharesFromRows;
   const signalLabel = netShares > 0 ? '加碼' : (netShares < 0 ? '減碼' : '持平');
-  let latestDate = null;
+  let latestDate = summaryMeta?.date || summaryMeta?.filingDate || null;
   normalized.forEach(item=>{
     if(item.reportDate && (!latestDate || dayjs(item.reportDate).isAfter(dayjs(latestDate)))){
       latestDate = item.reportDate;
@@ -280,10 +289,31 @@ function summarizeInstitutionalRows(rows){
   });
   const summaryParts = [];
   summaryParts.push(`機構${signalLabel}${netShares ? `（淨變動 ${formatMillions(netShares)} 股）` : ''}`);
+  if(summaryMeta?.investorsHolding!=null){
+    summaryParts.push(`共有 ${summaryMeta.investorsHolding} 家機構持有`);
+  }
+  if(summaryMeta?.ownershipPercent!=null){
+    summaryParts.push(`持股比重約 ${formatPercent(summaryMeta.ownershipPercent,1)}`);
+  }
+  if(Number.isFinite(summaryMeta?.totalInvested)){
+    summaryParts.push(`總投資 ${formatMillions(summaryMeta.totalInvested)}`);
+  }
   if(top[0]){
     const topWeight = top[0].weight!=null ? formatPercent(top[0].weight,1) : '';
     summaryParts.push(`${top[0].name} 約 ${formatMillions(top[0].value)} ${topWeight?`(${topWeight})`:''}`);
   }
+  const metaStats = summaryMeta ? {
+    investors_holding: summaryMeta.investorsHolding,
+    ownership_percent: summaryMeta.ownershipPercent,
+    total_invested: summaryMeta.totalInvested,
+    new_positions: summaryMeta.newPositions,
+    increased_positions: summaryMeta.increasedPositions,
+    reduced_positions: summaryMeta.reducedPositions,
+    closed_positions: summaryMeta.closedPositions,
+    put_call_ratio: summaryMeta.putCallRatio,
+    number_of_13f_shares: summaryMeta.numberOf13Fshares,
+    period_date: summaryMeta.date
+  } : null;
   return {
     as_of: latestDate,
     signal:{
@@ -291,7 +321,8 @@ function summarizeInstitutionalRows(rows){
       net_shares: netShares
     },
     top_holders: top,
-    summary: summaryParts.filter(Boolean).join('；')
+    summary: summaryParts.filter(Boolean).join('；'),
+    metrics: metaStats
   };
 }
 
@@ -786,18 +817,35 @@ async function performAnalysis(ticker, date, opts={}){
 
   const institutionalPromise = (async ()=>{
     if(storedInstitutional) return storedInstitutional;
-    const cacheKey = `institutional_${upperTicker}`;
-    let summary = await readCache(cacheKey, THIRTEENF_CACHE_TTL_MS);
-    if(summary) return summary;
-    try{
-      const rows = await getFmpInstitutionalHolders(upperTicker, FMP_KEY);
-      summary = summarizeInstitutionalRows(rows);
-      if(summary) await writeCache(cacheKey, summary);
-      return summary;
-    }catch(err){
-      console.warn('[Institutional]', err.message);
-      return null;
+    const baseQuarter = resolveQuarterYear(baselineDate);
+    const attemptOffsets = [0, -1, -2, -3];
+    for(const offset of attemptOffsets){
+      const target = offset === 0 ? baseQuarter : shiftQuarter(baseQuarter, offset);
+      const cacheKey = `institutional_${upperTicker}_${target.year}q${target.quarter}`;
+      const cached = await readCache(cacheKey, THIRTEENF_CACHE_TTL_MS);
+      if(cached){
+        if(cached.status === 'missing') continue;
+        return cached;
+      }
+      try{
+        const rows = await getFmpInstitutionalHolders({
+          symbol: upperTicker,
+          year: target.year,
+          quarter: target.quarter,
+          key: FMP_KEY
+        });
+        const summary = summarizeInstitutionalRows(rows);
+        if(summary){
+          summary.period = summary.period || `Q${target.quarter} ${target.year}`;
+          await writeCache(cacheKey, summary);
+          return summary;
+        }
+        await writeCache(cacheKey, { status:'missing' });
+      }catch(err){
+        console.warn('[Institutional]', err.message);
+      }
     }
+    return null;
   })();
 
   const earningsCallPromise = (async ()=>{
