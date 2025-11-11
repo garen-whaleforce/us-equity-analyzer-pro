@@ -1109,7 +1109,6 @@ app.post('/api/batch', upload.single('file'), async (req,res)=>{
           date: task.date,
           model: resolvedModel,
           current_price: '',
-          analyst_mean_target: '',
           llm_target_price: '',
           recommendation: `ERROR: ${errMessage}`,
           segment: '',
@@ -1117,8 +1116,7 @@ app.post('/api/batch', upload.single('file'), async (req,res)=>{
           news_sentiment: '',
           momentum_score: '',
           trend_flag: '',
-          institutional_signal: '',
-          earnings_call_highlight: ''
+          institutional_signal: ''
         };
       }
       const result = outcome.result;
@@ -1128,16 +1126,11 @@ app.post('/api/batch', upload.single('file'), async (req,res)=>{
       const momentum = result.momentum || {};
       const institutional = result.institutional;
       const earningsCall = result.earnings_call;
-      const earningsHighlight = earningsCall?.summary
-        || (earningsCall?.bullets?.[0]
-          ? `${earningsCall.bullets[0].title || '重點'}：${earningsCall.bullets[0].detail || ''}`
-          : '');
       return {
         ticker: result.input.ticker,
         date: task.date,
         model: resolvedModel,
         current_price: summary.quote?.c ?? '',
-        analyst_mean_target: summary.price_target?.targetMean ?? summary.price_target?.targetMedian ?? '',
         llm_target_price: result.analysis?.action?.target_price ?? '',
         recommendation: deferredMode ? 'DEFERRED' : (result.analysis?.action?.rating ?? ''),
         segment: profile?.segment_label || profile?.segment || '',
@@ -1145,11 +1138,10 @@ app.post('/api/batch', upload.single('file'), async (req,res)=>{
         news_sentiment: newsSent?.sentiment_label || '',
         momentum_score: momentum.score ?? '',
         trend_flag: momentum.trend || '',
-        institutional_signal: institutional?.signal?.label || institutional?.summary || '',
-        earnings_call_highlight: earningsHighlight || ''
+        institutional_signal: institutional?.signal?.label || institutional?.summary || ''
       };
     });
-    const fields = ['ticker','date','model','current_price','analyst_mean_target','llm_target_price','recommendation','segment','quality_score','news_sentiment','momentum_score','trend_flag','institutional_signal','earnings_call_highlight'];
+    const fields = ['ticker','date','model','current_price','llm_target_price','recommendation','segment','quality_score','news_sentiment','momentum_score','trend_flag','institutional_signal'];
     const csv = Papa.unparse({
       fields,
       data: rows.map(r=>fields.map(f=>r[f]))
