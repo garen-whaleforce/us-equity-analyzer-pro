@@ -24,7 +24,7 @@
 - `MAX_FILINGS_FOR_LLM`：送入 LLM 的財報份數（其餘仍儲存在結果中），預設 2 份。
 - `NEWS_ARTICLE_LIMIT` / `NEWS_EVENT_LIMIT` / `NEWS_KEYWORD_LIMIT`：送入 LLM 的新聞、事件與關鍵字數量上限。
 - `MDA_MAX_INPUT_CHARS`：MD&A 摘要輸入字元上限，預設 9,000。
-- 新聞來源優先順序：FMP Premium News → Finnhub company news，再由 LLM（或 heuristics）整理為關鍵事件，確保大量呼叫時仍穩定且省 token。
+- 新聞來源優先順序：FMP Premium News → Finnhub company news（僅保留明確提及該股或關鍵產業的稿件），再由 LLM（或 heuristics）整理為關鍵事件，確保大量呼叫時仍穩定且省 token。
 - FMP 13F 與 Earnings Call：後端會定期快取 13F 持股變化（前五大機構、淨加減碼）與最近一季 Earnings Call Transcript 摘要（次要模型生成要點），前端卡片與批次 CSV 都會同步顯示。
 - Cost logging 目前引用 OpenAI 官方價格表：`gpt-4o` 每百萬 token $5（輸入）/$15（輸出），`gpt-4o-mini` 每百萬 token $0.15 / $0.60。`gpt-5` 則可透過 `OPENAI_GPT5_INPUT_COST_PER_TOKEN` / `OPENAI_GPT5_OUTPUT_COST_PER_TOKEN` 覆寫。
 
@@ -76,7 +76,7 @@ curl -s -X POST http://localhost:5000/api/analyze \
 
 - 前端頁面底部的「批次分析」工作列可直接上傳 Excel/CSV；第一欄 `ticker`、第二欄 `date`（`YYYY-MM-DD`），舊版第三欄 `model` 仍相容但可留空。
 - 上傳前可透過「批次模式」下拉選擇 `完整分析`（含 LLM）、`僅快取` 或 `只整合資料（無 LLM）`，方便在大量匯入時節流。
-- 伺服器會依序執行與 `/api/analyze` 相同的流程，並輸出 CSV，欄位為：Ticker、Date、Model、現價、分析師平均/共識目標價、ChatGPT 總結目標價、建議、類型（大型/小型股）、體質分數、新聞情緒、動能評分、趨勢燈號。
+- 伺服器會依序執行與 `/api/analyze` 相同的流程，並輸出 CSV，欄位為：Ticker、Date、Model、現價、ChatGPT 總結目標價、建議、類型（大型/小型股）、體質分數、新聞情緒、動能評分、趨勢燈號。
 - 後端同時提供 `POST /api/batch`，multipart field 名稱為 `file`，可自動取得產出的 CSV。
 
 ## 部署到 Zeabur

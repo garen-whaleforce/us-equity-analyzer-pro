@@ -58,7 +58,7 @@ canvas{background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:10
 <body>
 <div class="wrap">
   <h1>美股個股分析</h1>
-  <p class="muted">輸入股票代號與日期（預設使用 OpenAI gpt-5，可切換為快速/僅快取模式），系統會優先以 FMP 快取現價與歷史價，再結合 SEC 財報、分析師均價、FMP+Finnhub 新聞情緒、動能/趨勢與體質評分，輸出 ChatGPT 總結、重大重點與批次報表。</p>
+  <p class="muted">輸入股票代號與日期（預設使用 OpenAI gpt-5，可切換為快速/僅快取模式），系統會優先以 FMP 快取現價與歷史價，再結合 SEC 財報、FMP+Finnhub 新聞情緒、動能/趨勢與體質評分，輸出 ChatGPT 總結、重大重點與批次報表。</p>
   <div class="card">
     <div class="row">
       <div><label>Ticker</label><input id="t" value="NVDA" placeholder="NVDA"/></div>
@@ -90,7 +90,6 @@ canvas{background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:10
     </div>
     <div class="kpis">
       <div class="kpi"><h3>現價</h3><p id="px">-</p></div>
-      <div class="kpi"><h3>分析師平均/共識目標價</h3><p id="ptMean">-</p></div>
       <div class="kpi"><h3>ChatGPT 總結目標價</h3><p id="ptRange">-</p></div>
       <div class="kpi"><h3>建議</h3><p id="rating">-</p></div>
       <div class="kpi"><h3>類型</h3><p id="segment">-</p></div>
@@ -149,7 +148,7 @@ canvas{background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:10
   <div class="card" style="margin-top:16px">
     <h3 style="margin:0 0 8px">批次分析</h3>
     <div class="summary muted" style="margin-bottom:12px">
-      利用下方工作列上傳 Excel/CSV（第一欄 ticker、第二欄 date，舊版第三欄 model 可留空），系統會逐行呼叫分析並下載包含現價、分析師平均/共識目標價、ChatGPT 目標價、建議、類型、體質分數、新聞情緒、動能分數、趨勢燈號、13F 信號與 Earnings Call 摘要的 CSV。
+      利用下方工作列上傳 Excel/CSV（第一欄 ticker、第二欄 date，舊版第三欄 model 可留空），系統會逐行呼叫分析並下載包含現價、ChatGPT 目標價、建議、類型、體質分數、新聞情緒、動能分數、趨勢燈號、13F 信號與 Earnings Call 摘要的 CSV。
     </div>
     <div class="summary muted">
       <strong>步驟：</strong><br/>
@@ -347,14 +346,6 @@ function setKPIs(quote, pt, priceMeta, action, profile, news, momentum){
   const metaLabel = formatPriceMeta(priceMeta);
   document.getElementById('px').textContent = metaLabel ? `${priceLabel}（${metaLabel}）` : priceLabel;
   const ptSourceLabel = formatPriceTargetSource(pt);
-  const ptMeanValue = targets.mean? ('$'+targets.mean.toFixed(2)) : '-';
-  let ptMeanDisplay = ptMeanValue;
-  if(ptSourceLabel === '未取得'){
-    ptMeanDisplay = '未取得';
-  }else if(ptSourceLabel){
-    ptMeanDisplay = `${ptMeanValue}（${ptSourceLabel}）`;
-  }
-  document.getElementById('ptMean').textContent = ptMeanDisplay;
   const llmTarget = toNum(action?.target_price);
   document.getElementById('ptRange').textContent = llmTarget? ('$'+llmTarget.toFixed(0)) : '-';
   const ratingRaw = typeof action?.rating==='string' ? action.rating : '';
