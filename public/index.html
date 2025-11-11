@@ -62,7 +62,7 @@ canvas{background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:10
   <div class="card">
     <div class="row">
       <div><label>Ticker</label><input id="t" value="NVDA" placeholder="NVDA"/></div>
-      <div><label>Date</label><input id="d" type="date" value="2025-11-08"/></div>
+      <div><label>Date</label><input id="d" type="date"/></div>
       <div>
         <label>LLM 模型</label>
         <select id="model">
@@ -679,6 +679,14 @@ const analyzeLabel = goBtn?.textContent || '分析';
 const modelSelect = document.getElementById('model');
 const modeSelect = document.getElementById('mode');
 const batchModeSelect = document.getElementById('batchMode');
+const dateInputEl = document.getElementById('d');
+if(dateInputEl){
+  const todayStr = dayjs().format('YYYY-MM-DD');
+  if(!dateInputEl.value){
+    dateInputEl.value = todayStr;
+  }
+  dateInputEl.max = todayStr;
+}
 let inFlightController = null;
 let userAborted = false;
 const analysisHistory = [];

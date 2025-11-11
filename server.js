@@ -19,7 +19,6 @@ import { computeMomentumMetrics } from './lib/momentum.js';
 import { getFmpQuote, getFmpInstitutionalHolders, getFmpEarningsCallTranscript } from './lib/fmp.js';
 import { getYahooQuote } from './lib/yahoo.js';
 import { clearCacheForTicker, getCache as readCache, setCache as writeCache } from './lib/cache.js';
-import { getSplitRatio } from './lib/splits.js';
 import { summarizeMda } from './lib/mdaSummarizer.js';
 import { summarizeCallTranscript } from './lib/callSummarizer.js';
 import { enqueueJob } from './lib/jobQueue.js';
