@@ -21,6 +21,8 @@ import { getYahooQuote } from './lib/yahoo.js';
 import { clearCacheForTicker, getCache as readCache, setCache as writeCache } from './lib/cache.js';
 import { getSplitRatio } from './lib/splits.js';
 import { summarizeMda } from './lib/mdaSummarizer.js';
+import { enqueueJob } from './lib/jobQueue.js';
+import { getAdaptiveLimits, recordUsage } from './lib/usageMonitor.js';
 
 const app = express();
 app.use(express.json());
@@ -117,7 +119,52 @@ function slimValue(value, key){
 }
 
 function buildSlimPayload(payload){
-  return slimValue(payload, '');
+  if(!payload) return payload;
+  const compact = {
+    c: payload.company,
+    b: payload.baseline_date,
+    f: Array.isArray(payload.sec_filings)
+      ? payload.sec_filings.map(entry=>({
+          f: entry.form,
+          fd: entry.filingDate,
+          rd: entry.reportDate,
+          ms: entry.mda_summary,
+          mx: entry.mda_excerpt
+        }))
+      : null,
+    fh: payload.finnhub ? {
+      r: payload.finnhub.recommendation,
+      e: payload.finnhub.earnings,
+      q: payload.finnhub.quote,
+      pt: payload.finnhub.price_target,
+      pm: payload.finnhub.price_meta
+    } : null,
+    n: payload.news ? {
+      k: payload.news.keywords,
+      a: payload.news.articles,
+      s: payload.news.sentiment
+    } : null,
+    m: payload.momentum ? {
+      s: payload.momentum.score,
+      t: payload.momentum.trend,
+      r: payload.momentum.returns ? {
+        q: toBps(payload.momentum.returns.m3),
+        h: toBps(payload.momentum.returns.m6),
+        y: toBps(payload.momentum.returns.m12)
+      } : null,
+      pm: payload.momentum.price_vs_ma,
+      e: payload.momentum.etf ? {
+        s: payload.momentum.etf.symbol,
+        r: toBps(payload.momentum.etf.return3m)
+      } : null
+    } : null
+  };
+  return slimValue(compact, '');
+}
+
+function toBps(value, scale=10000){
+  if(typeof value !== 'number' || Number.isNaN(value)) return null;
+  return Math.round(value * scale);
 }
 
 function filingSummaryCacheKey(ticker, form, filingDate){
@@ -276,12 +323,12 @@ function compactNewsBundle(bundle){
   };
 }
 
-function trimNewsForPayload(bundle){
+function trimNewsForPayload(bundle, limit=NEWS_ARTICLE_LIMIT){
   if(!bundle) return null;
   return {
     keywords: Array.isArray(bundle.keywords) ? bundle.keywords.slice(0, NEWS_KEYWORD_LIMIT) : [],
     articles: (bundle.articles || [])
-      .slice(0, NEWS_ARTICLE_LIMIT)
+      .slice(0, limit)
       .map(article=>({
         title: article.title,
         summary: (article.summary || '').slice(0, 180),
@@ -334,6 +381,9 @@ async function performAnalysis(ticker, date, opts={}){
   const effectiveLlmCacheTtl = Number.isFinite(llmCacheTtlMs) ? llmCacheTtlMs : analysisTtl;
   const useSecondarySummaries = !skipLlm && Boolean(OPENAI_KEY);
   const cacheModelKey = skipLlm ? `${llmModel}__metrics` : `${llmModel}__full`;
+  const adaptiveLimits = getAdaptiveLimits({ defaultFilings: MAX_FILINGS_FOR_LLM, defaultNews: NEWS_ARTICLE_LIMIT });
+  const filingLimit = Math.max(1, adaptiveLimits.maxFilings);
+  const effectiveNewsLimit = Math.max(1, adaptiveLimits.newsLimit);
 
   const cacheLookupKeys = skipLlm ? [cacheModelKey] : [cacheModelKey, llmModel];
   let cacheHit = null;
@@ -504,7 +554,7 @@ async function performAnalysis(ticker, date, opts={}){
         openKey: skipLlm ? null : OPENAI_KEY,
         model: secondaryModel,
         useLlm: !skipLlm,
-        articleLimit: NEWS_ARTICLE_LIMIT,
+        articleLimit: effectiveNewsLimit,
         finnhubKey: FH_KEY,
         fmpKey: FMP_KEY
       });
@@ -525,7 +575,7 @@ async function performAnalysis(ticker, date, opts={}){
     return momentum;
   })();
 
-  const summaryTargets = filings.slice(0, MAX_FILINGS_FOR_LLM);
+  const summaryTargets = filings.slice(0, filingLimit);
   const perFilingSummaries = await mapWithConcurrency(summaryTargets, 3, async (f)=>{
     const stored = findStoredFiling(storedSecFilings, f.form, f.filingDate);
     if(stored?.mda_summary){
@@ -621,7 +671,7 @@ async function performAnalysis(ticker, date, opts={}){
   const payload = {
     company: upperTicker,
     baseline_date: baselineDate,
-    sec_filings: perFiling.slice(0, MAX_FILINGS_FOR_LLM).map(x=>{
+    sec_filings: perFiling.slice(0, filingLimit).map(x=>{
       const entry = {
         form: x.form,
         form_label: x.formLabel || x.form,
@@ -637,7 +687,7 @@ async function performAnalysis(ticker, date, opts={}){
     finnhub: finnhubSnapshot
   };
 
-  payload.news = trimNewsForPayload(newsCompact);
+  payload.news = trimNewsForPayload(newsCompact, effectiveNewsLimit);
   payload.momentum = momentum;
   let llm = null;
   let llmUsage = null;
@@ -653,6 +703,7 @@ async function performAnalysis(ticker, date, opts={}){
       fallbackModel: secondaryModel
     });
     llmUsage = llm?.__usage || null;
+    if(llmUsage) recordUsage(llmUsage);
   }
 
   const result = {
@@ -730,7 +781,7 @@ app.post('/api/analyze', async (req,res)=>{
     const result = await performAnalysis(ticker, date, { model: resolvedModel, preferCacheOnly, skipLlm });
     res.json(result);
     if(deferredMode){
-      performAnalysis(ticker, date, { model: resolvedModel, preferCacheOnly:false, skipLlm:false })
+      enqueueJob(()=>performAnalysis(ticker, date, { model: resolvedModel, preferCacheOnly:false, skipLlm:false }))
         .catch(err=>console.warn('[deferred] background LLM failed', err.message));
     }
   }catch(err){
@@ -781,11 +832,11 @@ app.post('/api/batch', upload.single('file'), async (req,res)=>{
               skipLlm
             });
             if(deferredMode){
-              performAnalysis(task.ticker, task.date, {
+              enqueueJob(()=>performAnalysis(task.ticker, task.date, {
                 model: resolvedModel,
                 preferCacheOnly:false,
                 skipLlm:false
-              }).catch(err=>console.warn('[batch deferred]', err.message));
+              })).catch(err=>console.warn('[batch deferred]', err.message));
             }
             return { ok:true, result };
           }catch(error){
