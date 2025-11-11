@@ -377,84 +377,6 @@ async function performAnalysis(ticker, date, opts={}){
 
   const cik = await getCIK(upperTicker, UA, SEC_KEY);
   const filings = await getRecentFilings(cik, baselineDate, UA, SEC_KEY);
-  const summaryTargets = filings.slice(0, MAX_FILINGS_FOR_LLM);
-  const perFilingSummaries = await mapWithConcurrency(summaryTargets, 3, async (f)=>{
-    const stored = findStoredFiling(storedSecFilings, f.form, f.filingDate);
-    if(stored?.mda_summary){
-      if(useSecondarySummaries && stored.summary_kind === 'fallback'){
-        // allow regeneration with LLM if previously fallback
-      }else{
-        return stored;
-      }
-    }
-    const cacheKey = filingSummaryCacheKey(upperTicker, f.form, f.filingDate);
-    const cached = await readCache(cacheKey, FILING_SUMMARY_TTL_MS);
-    if(cached?.mda_summary){
-      const cachedKind = cached.summary_kind || 'llm';
-      if(useSecondarySummaries && cachedKind === 'fallback'){
-        // continue to regenerate with LLM
-      }else{
-        return {
-          form:f.form,
-          formLabel:f.formLabel,
-          filingDate:f.filingDate,
-          reportDate:f.reportDate,
-          mda_summary: cached.mda_summary,
-          mda_excerpt: cached.mda_excerpt,
-          summary_kind: cachedKind
-        };
-      }
-    }
-    const mda = await fetchMDA(f.url, UA);
-    let summaryBlock = { summary: mda.slice(0, 1200), kind: 'fallback' };
-    try{
-      summaryBlock = await summarizeMda({
-        text: mda,
-        openKey: OPENAI_KEY,
-        model: secondaryModel,
-        meta:{ ticker: upperTicker, form: f.form },
-        useLlm: useSecondarySummaries
-      });
-    }catch(err){
-      console.warn('[MDA Summary]', err.message);
-    }
-    const excerpt = summaryBlock.kind === 'fallback' ? mda.slice(0, 400) : undefined;
-    const snapshot = {
-      form:f.form,
-      formLabel:f.formLabel,
-      filingDate:f.filingDate,
-      reportDate:f.reportDate,
-      mda_summary: summaryBlock.summary,
-      summary_kind: summaryBlock.kind
-    };
-    if(excerpt){
-      snapshot.mda_excerpt = excerpt;
-    }
-    await writeCache(cacheKey, {
-      mda_summary: snapshot.mda_summary,
-      mda_excerpt: snapshot.mda_excerpt,
-      summary_kind: snapshot.summary_kind,
-      form:f.form,
-      ticker: upperTicker
-    });
-    return snapshot;
-  });
-  const summaryIndex = new Map(perFilingSummaries.map(item=>{
-    const key = `${item.form}_${item.filingDate}`;
-    return [key, item];
-  }));
-  const perFiling = filings.map(f=>{
-    const key = `${f.form}_${f.filingDate}`;
-    if(summaryIndex.has(key)) return summaryIndex.get(key);
-    return {
-      form:f.form,
-      formLabel:f.formLabel,
-      filingDate:f.filingDate,
-      reportDate:f.reportDate,
-      mda_summary:null,
-      summary_kind:null
-    };
-  });
 
   const finnhubPromise = (async ()=>{
     if(storedFinnhub) return storedFinnhub;
@@ -602,6 +524,85 @@ async function performAnalysis(ticker, date, opts={}){
     }
     return momentum;
   })();
+
+  const summaryTargets = filings.slice(0, MAX_FILINGS_FOR_LLM);
+  const perFilingSummaries = await mapWithConcurrency(summaryTargets, 3, async (f)=>{
+    const stored = findStoredFiling(storedSecFilings, f.form, f.filingDate);
+    if(stored?.mda_summary){
+      if(useSecondarySummaries && stored.summary_kind === 'fallback'){
+        // allow regeneration with LLM if previously fallback
+      }else{
+        return stored;
+      }
+    }
+    const cacheKey = filingSummaryCacheKey(upperTicker, f.form, f.filingDate);
+    const cached = await readCache(cacheKey, FILING_SUMMARY_TTL_MS);
+    if(cached?.mda_summary){
+      const cachedKind = cached.summary_kind || 'llm';
+      if(useSecondarySummaries && cachedKind === 'fallback'){
+        // continue to regenerate with LLM
+      }else{
+        return {
+          form:f.form,
+          formLabel:f.formLabel,
+          filingDate:f.filingDate,
+          reportDate:f.reportDate,
+          mda_summary: cached.mda_summary,
+          mda_excerpt: cached.mda_excerpt,
+          summary_kind: cachedKind
+        };
+      }
+    }
+    const mda = await fetchMDA(f.url, UA);
+    let summaryBlock = { summary: mda.slice(0, 1200), kind: 'fallback' };
+    try{
+      summaryBlock = await summarizeMda({
+        text: mda,
+        openKey: OPENAI_KEY,
+        model: secondaryModel,
+        meta:{ ticker: upperTicker, form: f.form },
+        useLlm: useSecondarySummaries
+      });
+    }catch(err){
+      console.warn('[MDA Summary]', err.message);
+    }
+    const excerpt = summaryBlock.kind === 'fallback' ? mda.slice(0, 400) : undefined;
+    const snapshot = {
+      form:f.form,
+      formLabel:f.formLabel,
+      filingDate:f.filingDate,
+      reportDate:f.reportDate,
+      mda_summary: summaryBlock.summary,
+      summary_kind: summaryBlock.kind
+    };
+    if(excerpt){
+      snapshot.mda_excerpt = excerpt;
+    }
+    await writeCache(cacheKey, {
+      mda_summary: snapshot.mda_summary,
+      mda_excerpt: snapshot.mda_excerpt,
+      summary_kind: snapshot.summary_kind,
+      form:f.form,
+      ticker: upperTicker
+    });
+    return snapshot;
+  });
+  const summaryIndex = new Map(perFilingSummaries.map(item=>{
+    const key = `${item.form}_${item.filingDate}`;
+    return [key, item];
+  }));
+  const perFiling = filings.map(f=>{
+    const key = `${f.form}_${f.filingDate}`;
+    if(summaryIndex.has(key)) return summaryIndex.get(key);
+    return {
+      form:f.form,
+      formLabel:f.formLabel,
+      filingDate:f.filingDate,
+      reportDate:f.reportDate,
+      mda_summary:null,
+      summary_kind:null
+    };
+  });
 
   const [finnhubSnapshot, newsCompact, momentum] = await Promise.all([
     finnhubPromise,
@@ -762,7 +763,8 @@ app.post('/api/batch', upload.single('file'), async (req,res)=>{
   try{
     const batchMode = String(req.query.mode || '').toLowerCase();
     const preferCacheOnly = batchMode === 'cached-only';
-    const skipLlm = batchMode === 'metrics-only';
+    const deferredMode = batchMode === 'deferred';
+    const skipLlm = batchMode === 'metrics-only' || deferredMode;
     const concurrencyLimit = resolveBatchConcurrency(batchMode);
     const tasks = parseBatchFile(req.file);
     if(!tasks.length) return res.status(400).json({error:'檔案內沒有有效的 ticker/date 列'});
@@ -778,6 +780,13 @@ app.post('/api/batch', upload.single('file'), async (req,res)=>{
               preferCacheOnly: preferCacheOnly && !skipLlm,
               skipLlm
             });
+            if(deferredMode){
+              performAnalysis(task.ticker, task.date, {
+                model: resolvedModel,
+                preferCacheOnly:false,
+                skipLlm:false
+              }).catch(err=>console.warn('[batch deferred]', err.message));
+            }
             return { ok:true, result };
           }catch(error){
             return { ok:false, error };
@@ -816,7 +825,7 @@ app.post('/api/batch', upload.single('file'), async (req,res)=>{
         current_price: summary.quote?.c ?? '',
         analyst_mean_target: summary.price_target?.targetMean ?? summary.price_target?.targetMedian ?? '',
         llm_target_price: result.analysis?.action?.target_price ?? '',
-        recommendation: result.analysis?.action?.rating ?? '',
+        recommendation: deferredMode ? 'DEFERRED' : (result.analysis?.action?.rating ?? ''),
         segment: profile?.segment_label || profile?.segment || '',
         quality_score: profile?.score ?? '',
         news_sentiment: newsSent?.sentiment_label || '',
