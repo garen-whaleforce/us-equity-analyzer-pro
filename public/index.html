@@ -28,6 +28,7 @@ button:disabled{opacity:.6;cursor:not-allowed}
 .kpi{background:#0f172a;border:1px solid #1f2937;border-radius:12px;padding:12px}
 .kpi h3{margin:0;font-size:13px;color:var(--muted)}
 .kpi p{margin:6px 0 0;font-size:20px;font-weight:700}
+.kpi .kpi-hint{display:block;margin-top:4px;font-size:12px;color:var(--muted)}
 pre{white-space:pre-wrap;word-break:break-word;background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:12px;color:#cbd5e1}
 canvas{background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:10px}
 .status-pill{margin-top:14px;display:inline-flex;align-items:center;gap:8px;padding:10px 14px;border-radius:999px;background:#0f172a;border:1px solid #1f2937;font-size:14px;color:var(--muted)}
@@ -97,13 +98,9 @@ canvas{background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:10
       <div class="kpi"><h3>新聞情緒</h3><p id="newsSentiment">-</p></div>
       <div class="kpi"><h3>動能評分</h3><p id="momentumScore">-</p></div>
       <div class="kpi"><h3>趨勢走向</h3><p id="trendFlag">-</p></div>
-      <div class="kpi"><h3>盤後價</h3><p id="extendedPrice">-</p></div>
-      <div class="kpi"><h3>盤後漲跌</h3><p id="extendedDelta">-</p></div>
       <div class="kpi"><h3>近月共識價</h3><p id="ptRecentMonth">-</p></div>
       <div class="kpi"><h3>近季共識價</h3><p id="ptRecentQuarter">-</p></div>
-      <div class="kpi"><h3>評級趨勢</h3><p id="ratingTrendKpi">-</p></div>
-      <div class="kpi"><h3>下一季 EPS / Revenue</h3><p id="estNextQuarter">-</p></div>
-      <div class="kpi"><h3>下一年 EPS / Revenue</h3><p id="estNextYear">-</p></div>
+      <div class="kpi"><h3>評級趨勢</h3><p id="ratingTrendKpi">-</p><small class="kpi-hint">A=上調／B=持平／C=下調</small></div>
     </div>
   </div>
 
@@ -470,20 +467,6 @@ function setKPIs(quote, pt, priceMeta, action, profile, news, momentum, analystM
   newsSentimentEl.textContent = news?.sentiment?.sentiment_label || '-';
   momentumScoreEl.textContent = toNum(momentum?.score) != null ? Math.round(momentum.score) : '-';
   trendFlagEl.textContent = momentum?.trend || '-';
-  const extended = priceMeta?.extended;
-  if(extendedPriceEl){
-    extendedPriceEl.textContent = toNum(extended?.price)!=null ? `$${toNum(extended.price).toFixed(2)}` : '-';
-  }
-  if(extendedDeltaEl){
-    const changeParts = [];
-    if(toNum(extended?.change)!=null){
-      changeParts.push(formatSignedDollar(extended.change));
-    }
-    if(toNum(extended?.change_percent)!=null){
-      changeParts.push(formatDeltaPercent(extended.change_percent));
-    }
-    extendedDeltaEl.textContent = changeParts.length ? changeParts.join(' / ') : '-';
-  }
   const analystMetrics = normalizeAnalystMetrics(analystMetricsRaw);
   const ptSnap = analystMetrics?.price_targets || {};
   ptRecentMonthEl.textContent = ptSnap.month_avg!=null ? formatUsd(ptSnap.month_avg) : '-';
@@ -492,8 +475,6 @@ function setKPIs(quote, pt, priceMeta, action, profile, news, momentum, analystM
     ? [analystMetrics.rating.latest || '-', analystMetrics.rating.trend_arrow || ''].filter(Boolean).join(' ')
     : '-';
   ratingTrendKpiEl.textContent = ratingLine || '-';
-  estNextQuarterEl.textContent = analystMetrics?.estimates ? formatEstimatePair(analystMetrics.estimates.quarterly) : '-';
-  estNextYearEl.textContent = analystMetrics?.estimates ? formatEstimatePair(analystMetrics.estimates.annual) : '-';
 }
 
 function renderTimeline(perFiling){
@@ -927,13 +908,9 @@ const goBtn = document.getElementById('go');
 const stopBtn = document.getElementById('stop');
 const momentumScoreEl = document.getElementById('momentumScore');
 const trendFlagEl = document.getElementById('trendFlag');
-const extendedPriceEl = document.getElementById('extendedPrice');
-const extendedDeltaEl = document.getElementById('extendedDelta');
 const ptRecentMonthEl = document.getElementById('ptRecentMonth');
 const ptRecentQuarterEl = document.getElementById('ptRecentQuarter');
 const ratingTrendKpiEl = document.getElementById('ratingTrendKpi');
-const estNextQuarterEl = document.getElementById('estNextQuarter');
-const estNextYearEl = document.getElementById('estNextYear');
 const momentumSummaryEl = document.getElementById('momentumSummary');
 const momentumDetailEl = document.getElementById('momentumDetail');
 const newsSentimentEl = document.getElementById('newsSentiment');
