@@ -291,7 +291,7 @@ function summarizeAnalystActions(rows=[]){
     }
     return {
       date: date.isValid() ? date.format('YYYY-MM-DD') : (row.date || null),
-      firm: row.firm || row.company ?? row.analystCompany || '',
+      firm: row.firm || row.company || row.analystCompany || '',
       action: row.action || row.toGrade || '',
       from: row.fromGrade || row.oldGrade || '',
       to: row.toGrade || row.newGrade || '',
