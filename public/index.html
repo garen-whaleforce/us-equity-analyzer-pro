@@ -97,6 +97,8 @@ canvas{background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:10
       <div class="kpi"><h3>新聞情緒</h3><p id="newsSentiment">-</p></div>
       <div class="kpi"><h3>動能評分</h3><p id="momentumScore">-</p></div>
       <div class="kpi"><h3>趨勢走向</h3><p id="trendFlag">-</p></div>
+      <div class="kpi"><h3>盤後價</h3><p id="extendedPrice">-</p></div>
+      <div class="kpi"><h3>盤後漲跌</h3><p id="extendedDelta">-</p></div>
       <div class="kpi"><h3>近月共識價</h3><p id="ptRecentMonth">-</p></div>
       <div class="kpi"><h3>近季共識價</h3><p id="ptRecentQuarter">-</p></div>
       <div class="kpi"><h3>評級趨勢</h3><p id="ratingTrendKpi">-</p></div>
@@ -132,6 +134,12 @@ canvas{background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:10
     <h3 style="margin:0 0 8px">新聞情緒與摘要</h3>
     <div id="newsSummary" class="summary muted">尚無新聞</div>
     <div id="newsArticles" class="summary" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h3 style="margin:0 0 8px">宏觀觀察</h3>
+    <div id="macroSummary" class="summary muted">尚無宏觀資料</div>
+    <div id="macroDetail" class="summary" style="margin-top:8px"></div>
   </div>
 
   <div class="card" style="margin-top:16px">
@@ -313,6 +321,26 @@ function formatMillions(value){
   return num.toFixed(0);
 }
 
+function formatYield(value){
+  const num = toNum(value);
+  return Number.isFinite(num) ? `${num.toFixed(2)}%` : '-';
+}
+
+function formatDeltaPercent(value){
+  const num = toNum(value);
+  if(!Number.isFinite(num)) return '-';
+  const scaled = Math.abs(num) <= 1 ? num * 100 : num;
+  const prefix = scaled > 0 ? '+' : '';
+  return `${prefix}${scaled.toFixed(2)}%`;
+}
+
+function formatSignedDollar(value){
+  const num = toNum(value);
+  if(!Number.isFinite(num)) return '';
+  const prefix = num > 0 ? '+' : '';
+  return `${prefix}$${Math.abs(num).toFixed(2)}`;
+}
+
 function formatUsd(value, digits=2){
   const num = toNum(value);
   return Number.isFinite(num) ? `$${num.toFixed(digits)}` : '-';
@@ -442,6 +470,20 @@ function setKPIs(quote, pt, priceMeta, action, profile, news, momentum, analystM
   newsSentimentEl.textContent = news?.sentiment?.sentiment_label || '-';
   momentumScoreEl.textContent = toNum(momentum?.score) != null ? Math.round(momentum.score) : '-';
   trendFlagEl.textContent = momentum?.trend || '-';
+  const extended = priceMeta?.extended;
+  if(extendedPriceEl){
+    extendedPriceEl.textContent = toNum(extended?.price)!=null ? `$${toNum(extended.price).toFixed(2)}` : '-';
+  }
+  if(extendedDeltaEl){
+    const changeParts = [];
+    if(toNum(extended?.change)!=null){
+      changeParts.push(formatSignedDollar(extended.change));
+    }
+    if(toNum(extended?.change_percent)!=null){
+      changeParts.push(formatDeltaPercent(extended.change_percent));
+    }
+    extendedDeltaEl.textContent = changeParts.length ? changeParts.join(' / ') : '-';
+  }
   const analystMetrics = normalizeAnalystMetrics(analystMetricsRaw);
   const ptSnap = analystMetrics?.price_targets || {};
   ptRecentMonthEl.textContent = ptSnap.month_avg!=null ? formatUsd(ptSnap.month_avg) : '-';
@@ -541,6 +583,29 @@ function renderMomentum(momentum){
   appendLine(momentumDetailEl, `RSI14 ${rsi} ｜ ATR14 ${atr} ｜ 量能比 (5/30) ${volRatio}`, 'muted');
   appendLine(momentumDetailEl, maLine, 'muted');
   appendLine(momentumDetailEl, `ETF 參考：${etfLine}`, 'muted');
+  if(momentum.indicators?.fmp){
+    const f = momentum.indicators.fmp;
+    const fmpParts = [];
+    if(toNum(f.ema20)!=null) fmpParts.push(`EMA20 ${toNum(f.ema20).toFixed(2)}`);
+    if(toNum(f.sma50)!=null) fmpParts.push(`SMA50 ${toNum(f.sma50).toFixed(2)}`);
+    if(toNum(f.rsi14)!=null) fmpParts.push(`RSI ${toNum(f.rsi14).toFixed(1)}`);
+    if(fmpParts.length) appendLine(momentumDetailEl, `FMP 指標：${fmpParts.join(' ｜ ')}`, 'muted');
+    if(f.macd && (toNum(f.macd.macd)!=null || toNum(f.macd.signal)!=null)){
+      const macdLine = [`MACD ${toNum(f.macd.macd)?.toFixed(2) ?? '-'}`];
+      if(toNum(f.macd.signal)!=null) macdLine.push(`Signal ${toNum(f.macd.signal).toFixed(2)}`);
+      appendLine(momentumDetailEl, `• ${macdLine.join(' ｜ ')}`, 'muted');
+    }
+  }
+  if(Array.isArray(momentum.etf?.sectors) && momentum.etf.sectors.length){
+    const topSectors = momentum.etf.sectors.slice(0,3).map(item=>{
+      const label = item.sector || item.name || '';
+      const weight = toNum(item.weightPercentage ?? item.weight ?? item.percent);
+      return `${label} ${weight!=null ? weight.toFixed(1)+'%' : ''}`.trim();
+    }).filter(Boolean);
+    if(topSectors.length){
+      appendLine(momentumDetailEl, `ETF 產業配重：${topSectors.join(' ｜ ')}`, 'muted');
+    }
+  }
 }
 
 function renderNews(bundle){
@@ -580,6 +645,36 @@ function renderNews(bundle){
   }
   if(!events.length && !articles.length){
     appendLine(newsArticlesEl, '（尚無可用新聞）', 'muted');
+  }
+}
+
+function renderMacro(data){
+  clearChildren(macroSummaryEl);
+  clearChildren(macroDetailEl);
+  if(!data){
+    appendLine(macroSummaryEl, '尚無宏觀資料', 'muted');
+    return;
+  }
+  const parts = [];
+  if(toNum(data.yields?.y10)!=null) parts.push(`10Y ${formatYield(data.yields.y10)}`);
+  if(toNum(data.yields?.y2)!=null) parts.push(`2Y ${formatYield(data.yields.y2)}`);
+  if(toNum(data.yields?.spread)!=null) parts.push(`利差 ${formatYield(data.yields.spread)}`);
+  if(parts.length) appendLine(macroSummaryEl, parts.join(' ｜ '));
+  if(data.market_risk_premium?.value!=null){
+    appendLine(macroSummaryEl, `市場風險溢酬 ${formatYield(data.market_risk_premium.value)}`, 'muted');
+  }
+  const events = Array.isArray(data.upcoming_events) ? data.upcoming_events : [];
+  if(events.length){
+    appendLine(macroDetailEl, '重點經濟事件', '');
+    events.forEach(ev=>{
+      appendLine(
+        macroDetailEl,
+        `• ${(ev.date || '').replace('T',' ').slice(0,16)} ${ev.event || ''} ${ev.country ? `(${ev.country})` : ''} ${ev.impact ? `[${ev.impact}]` : ''}`.trim(),
+        'muted'
+      );
+    });
+  }else{
+    appendLine(macroDetailEl, '近期無重大經濟事件', 'muted');
   }
 }
 
@@ -639,6 +734,37 @@ function renderInstitutional(data){
       const ratioText = Number.isFinite(ratio) ? ratio.toFixed(2) : metrics.put_call_ratio;
       appendLine(instDetailEl, `• Put/Call：${ratioText}`, 'muted');
     }
+  }
+  if(data.insider_activity){
+    appendLine(instDetailEl, '內部人動態', '');
+    if(data.insider_activity.summary_text){
+      appendLine(instDetailEl, `• ${data.insider_activity.summary_text}`, 'muted');
+    }
+    const stats = data.insider_activity.stats || {};
+    if(stats.net_shares!=null){
+      appendLine(instDetailEl, `• 淨買賣：${formatMillions(stats.net_shares)} 股`, 'muted');
+    }
+    if(stats.net_value!=null){
+      appendLine(instDetailEl, `• 金額：約 ${formatMillions(stats.net_value)}`, 'muted');
+    }
+    const recent = Array.isArray(data.insider_activity.recent) ? data.insider_activity.recent : [];
+    recent.forEach(item=>{
+      appendLine(instDetailEl, `• ${item.date || ''} ${item.insider || ''} ${item.type || ''} ${item.shares?`${formatMillions(item.shares)} 股`:''} @ ${item.price?`$${item.price}`:''}`.trim(), 'muted');
+    });
+  }
+  if(data.analyst_actions){
+    const actions = data.analyst_actions;
+    appendLine(instDetailEl, '券商升/降評', '');
+    if(actions.window_7d){
+      appendLine(instDetailEl, `• 7 天：升評 ${actions.window_7d.upgrades ?? 0} / 降評 ${actions.window_7d.downgrades ?? 0}`, 'muted');
+    }
+    if(actions.window_30d){
+      appendLine(instDetailEl, `• 30 天：升評 ${actions.window_30d.upgrades ?? 0} / 降評 ${actions.window_30d.downgrades ?? 0}`, 'muted');
+    }
+    const recentActions = Array.isArray(actions.recent) ? actions.recent.slice(0,3) : [];
+    recentActions.forEach(item=>{
+      appendLine(instDetailEl, `• ${item.date || ''} ${item.firm || ''}：${item.action || ''} → ${item.to || ''}${item.price_target?`，目標價 ${formatUsd(item.price_target,0)}`:''}`, 'muted');
+    });
   }
 }
 
@@ -801,6 +927,8 @@ const goBtn = document.getElementById('go');
 const stopBtn = document.getElementById('stop');
 const momentumScoreEl = document.getElementById('momentumScore');
 const trendFlagEl = document.getElementById('trendFlag');
+const extendedPriceEl = document.getElementById('extendedPrice');
+const extendedDeltaEl = document.getElementById('extendedDelta');
 const ptRecentMonthEl = document.getElementById('ptRecentMonth');
 const ptRecentQuarterEl = document.getElementById('ptRecentQuarter');
 const ratingTrendKpiEl = document.getElementById('ratingTrendKpi');
@@ -817,6 +945,8 @@ const callSummaryEl = document.getElementById('callSummary');
 const callDetailEl = document.getElementById('callDetail');
 const analystSummaryEl = document.getElementById('analystSummary');
 const analystDetailEl = document.getElementById('analystDetail');
+const macroSummaryEl = document.getElementById('macroSummary');
+const macroDetailEl = document.getElementById('macroDetail');
 const historyListEl = document.getElementById('historyList');
 const refreshBtn = document.getElementById('refreshCache');
 const refreshLabel = refreshBtn?.textContent || '重新抓取';
@@ -838,6 +968,7 @@ const analysisHistory = [];
 let lastCompletedParams = null;
 
 renderNews(null);
+renderMacro(null);
 renderInstitutional(null);
 renderEarningsCall(null);
 renderMomentum(null);
@@ -941,6 +1072,7 @@ async function analyze(){
     renderConclusion(j?.analysis, j?.llm_usage);
     renderProfile(j?.analysis?.profile);
     renderNews(j?.news);
+    renderMacro(j?.macro);
     renderInstitutional(j?.institutional);
     renderEarningsCall(j?.earnings_call);
     renderMomentum(j?.momentum);

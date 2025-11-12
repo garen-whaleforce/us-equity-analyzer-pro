@@ -16,7 +16,26 @@ import { getHistoricalPrice } from './lib/historicalPrice.js';
 import { getCachedAnalysis, saveAnalysisResult, deleteAnalysis, getStoredResult } from './lib/analysisStore.js';
 import { buildNewsBundle } from './lib/news.js';
 import { computeMomentumMetrics } from './lib/momentum.js';
-import { getFmpQuote, getFmpInstitutionalHolders, getFmpEarningsCallTranscript, getFmpPriceTargetSummary, getFmpAnalystEstimates, getFmpRatingsSnapshot, getFmpRatingsHistorical, getFmpGrades, getFmpGradesHistorical, getFmpGradesConsensus } from './lib/fmp.js';
+import {
+  getFmpQuote,
+  getFmpInstitutionalHolders,
+  getFmpEarningsCallTranscript,
+  getFmpPriceTargetSummary,
+  getFmpAnalystEstimates,
+  getFmpRatingsSnapshot,
+  getFmpRatingsHistorical,
+  getFmpGrades,
+  getFmpGradesHistorical,
+  getFmpGradesConsensus,
+  getFmpAftermarketQuote,
+  getFmpAftermarketTrades,
+  getFmpInsiderTrading,
+  getFmpInsiderStats,
+  getFmpAnalystActions,
+  getFmpEconomicCalendar,
+  getFmpTreasuryCurve,
+  getFmpMarketRiskPremium
+} from './lib/fmp.js';
 import { getYahooQuote } from './lib/yahoo.js';
 import { clearCacheForTicker, getCache as readCache, setCache as writeCache } from './lib/cache.js';
 import { summarizeMda } from './lib/mdaSummarizer.js';
@@ -70,6 +89,13 @@ const ANALYST_GRADES_TTL_MS = 7 * DAY_MS;
 const ANALYST_GRADES_HISTORY_TTL_MS = 14 * DAY_MS;
 const ANALYST_GRADES_CONSENSUS_TTL_MS = 14 * DAY_MS;
 const ANALYST_GRADES_LOOKBACK_DAYS = Number(process.env.ANALYST_GRADES_LOOKBACK_DAYS || 90);
+const AFTERMARKET_CACHE_TTL_MS = Number(process.env.AFTERMARKET_CACHE_TTL_MS || 60) * 1000;
+const INSIDER_CACHE_TTL_MS = Number(process.env.INSIDER_CACHE_TTL_HOURS || 3) * 60 * 60 * 1000;
+const ANALYST_ACTION_CACHE_TTL_MS = Number(process.env.ANALYST_ACTION_CACHE_TTL_HOURS || 3) * 60 * 60 * 1000;
+const MACRO_CACHE_TTL_MS = Number(process.env.MACRO_CACHE_TTL_MINUTES || 60) * 60 * 1000;
+const MACRO_EVENT_LIMIT = Number(process.env.MACRO_EVENT_RENDER_LIMIT || 5);
+const MACRO_EVENT_LOOKBACK_DAYS = Number(process.env.MACRO_EVENT_LOOKBACK_DAYS || 3);
+const MACRO_EVENT_LOOKAHEAD_DAYS = Number(process.env.MACRO_EVENT_LOOKAHEAD_DAYS || 10);
 const MAX_FILINGS_FOR_LLM = Math.max(1, Number(process.env.MAX_FILINGS_FOR_LLM || 2));
 const NEWS_ARTICLE_LIMIT = Math.max(1, Number(process.env.NEWS_ARTICLE_LIMIT || 4));
 const NEWS_EVENT_LIMIT = Math.max(1, Number(process.env.NEWS_EVENT_LIMIT || 3));
@@ -187,6 +213,138 @@ function formatPercent(val, digits=1){
   return `${pct.toFixed(digits)}%`;
 }
 
+function normalizeExtendedQuoteSnapshot(quote, trades){
+  if(!quote) return null;
+  const extended = {
+    session: (quote.session || quote.type || 'afterhours').toLowerCase(),
+    price: toFloat(quote.price ?? quote.last ?? quote.close),
+    change: toFloat(quote.change ?? quote.priceChange ?? quote.delta),
+    change_percent: toFloat(quote.changePercent ?? quote.change_percentage ?? quote.percentChange),
+    volume: toFloat(quote.volume ?? quote.size ?? quote.totalVolume) ?? null,
+    as_of: quote.timestamp
+      ? dayjs(Number(quote.timestamp) * (quote.timestamp > 1e12 ? 1 : 1000)).toISOString()
+      : (quote.date || quote.time || quote.lastTradeTime || null),
+    source: 'fmp_aftermarket'
+  };
+  if(Array.isArray(trades) && trades.length){
+    extended.recent_trades = trades.slice(0,3).map(trade=>({
+      price: toFloat(trade.price ?? trade.executionPrice ?? trade.lastPrice),
+      size: toFloat(trade.size ?? trade.quantity ?? trade.lastSize),
+      venue: trade.exchange || trade.venue || null,
+      timestamp: trade.timestamp
+        ? dayjs(Number(trade.timestamp) * (trade.timestamp > 1e12 ? 1 : 1000)).toISOString()
+        : (trade.date || trade.time || null)
+    })).filter(item=> item.price!=null || item.size!=null);
+  }
+  return extended;
+}
+
+function summarizeInsiderActivity(trades=[], stats=[]){
+  const latestStat = Array.isArray(stats) ? stats.find(Boolean) : null;
+  const summary = latestStat ? {
+    period: latestStat.period || latestStat.date || null,
+    net_shares: toFloat(latestStat.netShares ?? latestStat.totalBoughtShares - latestStat.totalSoldShares),
+    net_value: toFloat(latestStat.netTransactionValue ?? latestStat.totalBoughtValue - latestStat.totalSoldValue),
+    buy_ratio: toFloat(latestStat.buyPercentage ?? latestStat.buySellRatio),
+    total_trades: latestStat.totalTransactions ?? latestStat.total ?? null
+  } : null;
+  const recent = Array.isArray(trades)
+    ? trades.slice(0,5).map(row=>({
+        date: row.transactionDate || row.filingDate || row.date || null,
+        insider: row.insiderName || row.reportedTitle || row.officerName || row.name || 'Insider',
+        relation: row.position ?? row.relationship ?? '',
+        type: row.transactionType || row.type || '',
+        shares: toFloat(row.shares) ?? toFloat(row.quantity),
+        price: toFloat(row.price ?? row.transactionPrice),
+        value: toFloat(row.totalValue ?? (row.shares && row.price ? row.shares * row.price : null))
+      }))
+      .filter(item=>item.date || item.insider)
+    : [];
+  if(!summary && !recent.length) return null;
+  const sentiment = summary?.net_shares!=null
+    ? (summary.net_shares > 0 ? '連續淨買超' : summary.net_shares < 0 ? '持續淨賣超' : '買賣均衡')
+    : null;
+  return {
+    summary_text: sentiment,
+    stats: summary,
+    recent
+  };
+}
+
+function summarizeAnalystActions(rows=[]){
+  if(!Array.isArray(rows) || !rows.length) return null;
+  const now = dayjs();
+  let upgrades7 = 0, downgrades7 = 0, upgrades30 = 0, downgrades30 = 0;
+  const normalized = rows.slice(0,6).map(row=>{
+    const date = dayjs(row.publishedDate || row.date || row.lastUpdated || row.effectiveDate);
+    const days = date.isValid() ? now.diff(date, 'day') : null;
+    const action = (row.action || row.grade || '').toLowerCase();
+    if(days!=null){
+      if(days <= 7){
+        if(/upgrade|raise/i.test(row.action || row.toGrade || '')) upgrades7++;
+        if(/downgrade|lower/i.test(row.action || row.toGrade || '')) downgrades7++;
+      }
+      if(days <= 30){
+        if(/upgrade|raise/i.test(row.action || row.toGrade || '')) upgrades30++;
+        if(/downgrade|lower/i.test(row.action || row.toGrade || '')) downgrades30++;
+      }
+    }
+    return {
+      date: date.isValid() ? date.format('YYYY-MM-DD') : (row.date || null),
+      firm: row.firm || row.company ?? row.analystCompany || '',
+      action: row.action || row.toGrade || '',
+      from: row.fromGrade || row.oldGrade || '',
+      to: row.toGrade || row.newGrade || '',
+      price_target: toFloat(row.priceTarget) ?? toFloat(row.newPriceTarget)
+    };
+  });
+  return {
+    window_7d:{ upgrades: upgrades7, downgrades: downgrades7 },
+    window_30d:{ upgrades: upgrades30, downgrades: downgrades30 },
+    recent: normalized
+  };
+}
+
+function pickLatest(rows){
+  if(!Array.isArray(rows) || !rows.length) return null;
+  return [...rows].sort((a,b)=> dayjs(b.date || b.publishedDate).valueOf() - dayjs(a.date || a.publishedDate).valueOf())[0];
+}
+
+function summarizeMacroSnapshot({ events=[], twoYear=[], tenYear=[], riskPremium=[] }){
+  if(!events.length && !twoYear.length && !riskPremium.length) return null;
+  const latest10 = pickLatest(tenYear);
+  const latest2 = pickLatest(twoYear);
+  const y10 = toFloat(latest10?.value ?? latest10?.close ?? latest10?.yield);
+  const y2 = toFloat(latest2?.value ?? latest2?.close ?? latest2?.yield);
+  const spread = (y10!=null && y2!=null) ? y10 - y2 : null;
+  const curatedEvents = events
+    .filter(ev=>ev && ev.event)
+    .map(ev=>({
+      date: ev.date || ev.publishedDate || ev.time || null,
+      event: ev.event || ev.title || '',
+      country: ev.country || ev.region || '',
+      actual: ev.actual ?? ev.actualValue ?? null,
+      consensus: ev.consensus ?? ev.estimate ?? null,
+      previous: ev.previous ?? null,
+      impact: ev.importance || ev.impact || null
+    }))
+    .slice(0, MACRO_EVENT_LIMIT);
+  const latestRisk = pickLatest(riskPremium);
+  return {
+    yields:{
+      y10,
+      y2,
+      spread,
+      as_of: latest10?.date || latest2?.date || null
+    },
+    upcoming_events: curatedEvents,
+    market_risk_premium: latestRisk ? {
+      value: toFloat(latestRisk.value ?? latestRisk.marketRiskPremium ?? latestRisk.riskPremium),
+      as_of: latestRisk.date || null
+    } : null
+  };
+}
+
 function parsePublishers(raw){
   if(!raw) return [];
   try{
@@ -206,6 +364,119 @@ function summarizePriceTargetSummary(row){
     all_time:{ count: row.allTimeCount ?? null, avg: row.allTimeAvgPriceTarget ?? null },
     publishers: parsePublishers(row.publishers)
   };
+}
+
+async function fetchAftermarketSnapshot(ticker){
+  if(!FMP_KEY) return null;
+  const cacheKey = `aftermarket_${ticker}`;
+  const cached = await readCache(cacheKey, AFTERMARKET_CACHE_TTL_MS);
+  if(cached) return cached.__empty ? null : cached;
+  try{
+    const [quote, trades] = await Promise.all([
+      getFmpAftermarketQuote(ticker, FMP_KEY),
+      getFmpAftermarketTrades(ticker, FMP_KEY, { limit:3 })
+    ]);
+    const normalized = normalizeExtendedQuoteSnapshot(quote, trades);
+    await writeCache(cacheKey, normalized || { __empty:true });
+    return normalized;
+  }catch(err){
+    console.warn('[Aftermarket]', err.message);
+    await writeCache(cacheKey, { __empty:true });
+    return null;
+  }
+}
+
+async function fetchInsiderSnapshot(ticker){
+  if(!FMP_KEY) return null;
+  const cacheKey = `insider_${ticker}`;
+  const cached = await readCache(cacheKey, INSIDER_CACHE_TTL_MS);
+  if(cached) return cached.__empty ? null : cached;
+  try{
+    const [trades, stats] = await Promise.all([
+      getFmpInsiderTrading({ symbol: ticker, limit: 10 }, FMP_KEY),
+      getFmpInsiderStats({ symbol: ticker, period:'monthly', limit:2 }, FMP_KEY)
+    ]);
+    const summary = summarizeInsiderActivity(trades, stats);
+    await writeCache(cacheKey, summary || { __empty:true });
+    return summary;
+  }catch(err){
+    console.warn('[Insider]', err.message);
+    await writeCache(cacheKey, { __empty:true });
+    return null;
+  }
+}
+
+async function fetchAnalystActionSnapshot(ticker){
+  if(!FMP_KEY) return null;
+  const cacheKey = `analyst_actions_${ticker}`;
+  const cached = await readCache(cacheKey, ANALYST_ACTION_CACHE_TTL_MS);
+  if(cached) return cached.__empty ? null : cached;
+  try{
+    const actions = await getFmpAnalystActions({ symbol: ticker, limit: 20 }, FMP_KEY);
+    const summary = summarizeAnalystActions(actions || []);
+    await writeCache(cacheKey, summary || { __empty:true });
+    return summary;
+  }catch(err){
+    console.warn('[AnalystActions]', err.message);
+    await writeCache(cacheKey, { __empty:true });
+    return null;
+  }
+}
+
+async function fetchMacroSnapshot(baselineDate){
+  if(!FMP_KEY) return null;
+  const windowStart = dayjs(baselineDate).subtract(MACRO_EVENT_LOOKBACK_DAYS, 'day').format('YYYY-MM-DD');
+  const windowEnd = dayjs(baselineDate).add(MACRO_EVENT_LOOKAHEAD_DAYS, 'day').format('YYYY-MM-DD');
+  const cacheKey = `macro_${windowStart}_${windowEnd}`;
+  const cached = await readCache(cacheKey, MACRO_CACHE_TTL_MS);
+  if(cached) return cached.__empty ? null : cached;
+  try{
+    const [events, tenYear, twoYear, mrp] = await Promise.all([
+      getFmpEconomicCalendar({ from: windowStart, to: windowEnd }, FMP_KEY).catch(err=>{ console.warn('[Macro] calendar failed', err.message); return []; }),
+      getFmpTreasuryCurve({ from: windowStart, to: windowEnd, maturity:'10year' }, FMP_KEY).catch(err=>{ console.warn('[Macro] 10y failed', err.message); return []; }),
+      getFmpTreasuryCurve({ from: windowStart, to: windowEnd, maturity:'02year' }, FMP_KEY).catch(err=>{ console.warn('[Macro] 2y failed', err.message); return []; }),
+      getFmpMarketRiskPremium({ from: windowStart, to: windowEnd }, FMP_KEY).catch(err=>{ console.warn('[Macro] mrp failed', err.message); return []; })
+    ]);
+    const summary = summarizeMacroSnapshot({ events, tenYear, twoYear, riskPremium: mrp });
+    await writeCache(cacheKey, summary || { __empty:true });
+    return summary;
+  }catch(err){
+    console.warn('[Macro] snapshot failed', err.message);
+    await writeCache(cacheKey, { __empty:true });
+    return null;
+  }
+}
+
+async function fetchInstitutionalBase(ticker, baselineDate){
+  const baseQuarter = resolveQuarterYear(baselineDate);
+  const attemptOffsets = [0, -1, -2, -3];
+  for(const offset of attemptOffsets){
+    const target = offset === 0 ? baseQuarter : shiftQuarter(baseQuarter, offset);
+    const cacheKey = `institutional_${ticker}_${target.year}q${target.quarter}`;
+    const cached = await readCache(cacheKey, THIRTEENF_CACHE_TTL_MS);
+    if(cached){
+      if(cached.status === 'missing') continue;
+      return cached;
+    }
+    try{
+      const rows = await getFmpInstitutionalHolders({
+        symbol: ticker,
+        year: target.year,
+        quarter: target.quarter,
+        key: FMP_KEY
+      });
+      const summary = summarizeInstitutionalRows(rows);
+      if(summary){
+        summary.period = summary.period || `Q${target.quarter} ${target.year}`;
+        await writeCache(cacheKey, summary);
+        return summary;
+      }
+      await writeCache(cacheKey, { status:'missing' });
+    }catch(err){
+      console.warn('[Institutional]', err.message);
+    }
+  }
+  return null;
 }
 
 function normalizeEstimateList(list, { take=5 }={}){
@@ -574,12 +845,17 @@ function buildNewsSignal(bundle){
 
 function buildInstitutionalSignal(institutional){
   if(!institutional) return null;
-  return {
+  const payload = {
     signal: institutional.signal?.label || null,
     net_shares: institutional.signal?.net_shares ?? null,
     ownership_percent: institutional.metrics?.ownership_percent ?? null,
     investors_holding: institutional.metrics?.investors_holding ?? null
   };
+  if(institutional.insider_activity){
+    payload.insider_net_shares = institutional.insider_activity.stats?.net_shares ?? null;
+    payload.insider_summary = institutional.insider_activity.summary_text || null;
+  }
+  return payload;
 }
 
 function buildEarningsSignal(earningsCall){
@@ -591,7 +867,23 @@ function buildEarningsSignal(earningsCall){
   };
 }
 
-function buildNumericPayload({ ticker, baselineDate, filings, priceMeta, analystMetrics, momentum, institutional, news, earningsCall }){
+function buildMacroSignal(macro){
+  if(!macro) return null;
+  return {
+    yield_spread: toFloat(macro.yields?.spread),
+    yield_10y: toFloat(macro.yields?.y10),
+    events: Array.isArray(macro.upcoming_events)
+      ? macro.upcoming_events.slice(0,3).map(ev=>({
+          date: ev.date,
+          event: ev.event,
+          country: ev.country,
+          impact: ev.impact
+        }))
+      : []
+  };
+}
+
+function buildNumericPayload({ ticker, baselineDate, filings, priceMeta, analystMetrics, momentum, institutional, news, earningsCall, macro }){
   return {
     company: ticker,
     ticker,
@@ -606,7 +898,14 @@ function buildNumericPayload({ ticker, baselineDate, filings, priceMeta, analyst
     price: {
       value: toFloat(priceMeta?.value),
       as_of: priceMeta?.as_of || baselineDate,
-      source: priceMeta?.source || null
+      source: priceMeta?.source || null,
+      extended: priceMeta?.extended ? {
+        price: toFloat(priceMeta.extended.price),
+        change: toFloat(priceMeta.extended.change),
+        change_percent: toFloat(priceMeta.extended.change_percent),
+        session: priceMeta.extended.session,
+        as_of: priceMeta.extended.as_of
+      } : null
     },
     analyst_metrics: analystMetrics || null,
     momentum: momentum ? {
@@ -620,7 +919,8 @@ function buildNumericPayload({ ticker, baselineDate, filings, priceMeta, analyst
     } : null,
     institutional: buildInstitutionalSignal(institutional),
     news: buildNewsSignal(news),
-    earnings_call: buildEarningsSignal(earningsCall)
+    earnings_call: buildEarningsSignal(earningsCall),
+    macro: buildMacroSignal(macro)
   };
 }
 
@@ -972,6 +1272,14 @@ async function performAnalysis(ticker, date, opts={}){
 
     priceMeta.value = current;
     const quote = { ...(finnhub.quote || {}), c: current };
+    if(!isHistorical){
+      try{
+        const extended = await fetchAftermarketSnapshot(upperTicker);
+        if(extended) priceMeta.extended = extended;
+      }catch(err){
+        console.warn('[Aftermarket attach]', err.message);
+      }
+    }
 
     let ptAgg;
     try{
@@ -1114,36 +1422,16 @@ async function performAnalysis(ticker, date, opts={}){
   });
 
   const institutionalPromise = (async ()=>{
-    if(storedInstitutional) return storedInstitutional;
-    const baseQuarter = resolveQuarterYear(baselineDate);
-    const attemptOffsets = [0, -1, -2, -3];
-    for(const offset of attemptOffsets){
-      const target = offset === 0 ? baseQuarter : shiftQuarter(baseQuarter, offset);
-      const cacheKey = `institutional_${upperTicker}_${target.year}q${target.quarter}`;
-      const cached = await readCache(cacheKey, THIRTEENF_CACHE_TTL_MS);
-      if(cached){
-        if(cached.status === 'missing') continue;
-        return cached;
-      }
-      try{
-        const rows = await getFmpInstitutionalHolders({
-          symbol: upperTicker,
-          year: target.year,
-          quarter: target.quarter,
-          key: FMP_KEY
-        });
-        const summary = summarizeInstitutionalRows(rows);
-        if(summary){
-          summary.period = summary.period || `Q${target.quarter} ${target.year}`;
-          await writeCache(cacheKey, summary);
-          return summary;
-        }
-        await writeCache(cacheKey, { status:'missing' });
-      }catch(err){
-        console.warn('[Institutional]', err.message);
-      }
-    }
-    return null;
+    let base = storedInstitutional || await fetchInstitutionalBase(upperTicker, baselineDate);
+    const [insider, analystActions] = await Promise.all([
+      fetchInsiderSnapshot(upperTicker),
+      fetchAnalystActionSnapshot(upperTicker)
+    ]);
+    if(!base && !insider && !analystActions) return null;
+    const enriched = { ...(base || {}) };
+    if(insider) enriched.insider_activity = insider;
+    if(analystActions) enriched.analyst_actions = analystActions;
+    return enriched;
   })();
 
   const earningsCallPromise = (async ()=>{
@@ -1279,13 +1567,16 @@ async function performAnalysis(ticker, date, opts={}){
     return null;
   })();
 
-  const [finnhubSnapshot, newsCompact, momentum, institutional, earningsCall, analystSignals] = await Promise.all([
+  const macroPromise = fetchMacroSnapshot(baselineDate);
+
+  const [finnhubSnapshot, newsCompact, momentum, institutional, earningsCall, analystSignals, macroInsights] = await Promise.all([
     finnhubPromise,
     newsPromise,
     momentumPromise,
     institutionalPromise,
     earningsCallPromise,
-    analystSignalsPromise
+    analystSignalsPromise,
+    macroPromise
   ]);
 
   const priceMeta = finnhubSnapshot?.price_meta || {
@@ -1307,7 +1598,8 @@ async function performAnalysis(ticker, date, opts={}){
     momentum,
     institutional,
     news: llmNews,
-    earningsCall
+    earningsCall,
+    macro: macroInsights
   });
   let llm = null;
   let llmUsage = null;
@@ -1342,6 +1634,7 @@ async function performAnalysis(ticker, date, opts={}){
     analyst_signals: analystSignals,
     per_filing_summaries: perFiling,
     analyst_metrics: analystMetrics,
+    macro: macroInsights,
     inputs: llmPayload
   };
   saveAnalysisResult({ ticker: upperTicker, baselineDate, isHistorical, model: cacheModelKey, result });
