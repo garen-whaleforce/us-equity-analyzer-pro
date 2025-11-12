@@ -81,7 +81,7 @@ const NEWS_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const MOMENTUM_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const THIRTEENF_CACHE_TTL_MS = 30 * DAY_MS;
 const EARNINGS_CALL_TTL_MS = 30 * DAY_MS;
-const ANALYST_AGGREGATE_TTL_MS = Number(process.env.ANALYST_AGGREGATE_TTL_HOURS || 24) * 60 * 60 * 1000;
+const ANALYST_AGGREGATE_TTL_MS = Number(process.env.ANALYST_AGGREGATE_TTL_HOURS || 72) * 60 * 60 * 1000;
 const ANALYST_PRICE_TARGET_TTL_MS = 7 * DAY_MS;
 const ANALYST_ESTIMATES_TTL_MS = 14 * DAY_MS;
 const ANALYST_RATING_SNAPSHOT_TTL_MS = 7 * DAY_MS;
@@ -115,6 +115,7 @@ const ANALYST_ACTION_MAX_AGE_DAYS = Number(process.env.ANALYST_ACTION_MAX_AGE_DA
 const REALTIME_QUOTE_TTL_MS = Number(process.env.REALTIME_QUOTE_TTL_MS || 15) * 1000;
 
 const realtimeQuoteCache = new Map();
+const analystSignalInflight = new Map();
 
 function cacheRealtimeQuote(symbol, payload){
   if(!symbol || !payload) return;
@@ -996,43 +997,55 @@ function buildMacroSignal(macro){
 }
 
 function buildNumericPayload({ ticker, baselineDate, filings, priceMeta, analystMetrics, momentum, institutional, news, earningsCall, macro }){
+  const filingSummaries = Array.isArray(filings)
+    ? filings.slice(0, MAX_FILINGS_FOR_LLM).map(entry=>({
+        form: entry.form,
+        filingDate: entry.filingDate,
+        reportDate: entry.reportDate
+      }))
+    : [];
+  const priceSummary = {
+    value: toFloat(priceMeta?.value),
+    as_of: priceMeta?.as_of || baselineDate,
+    source: priceMeta?.source || null
+  };
+  const momentumSummary = momentum ? {
+    score: toFloat(momentum.score),
+    trend: momentum.trend || null
+  } : null;
+  const institutionalSummary = institutional ? {
+    signal: institutional.signal?.label || null,
+    net_shares: institutional.signal?.net_shares ?? null,
+    insider_sentiment: institutional.insider_activity?.summary_text || null,
+    analyst_upgrades_30d: institutional.analyst_actions?.window_30d?.upgrades ?? null,
+    analyst_downgrades_30d: institutional.analyst_actions?.window_30d?.downgrades ?? null
+  } : null;
+  const newsSummary = news ? {
+    sentiment_label: news.sentiment_label || null,
+    summary: news.summary || null
+  } : null;
+  const earningsSummary = earningsCall ? {
+    quarter: earningsCall.quarter || null,
+    summary: earningsCall.summary || null
+  } : null;
+  const macroSummary = macro ? {
+    yield_spread: toFloat(macro.yield_spread ?? macro.yields?.spread),
+    yield_10y: toFloat(macro.yield_10y ?? macro.yields?.y10 ?? macro.yields?.yield10),
+    event_note: Array.isArray(macro.events) && macro.events.length ? macro.events[0].event : null
+  } : null;
+
   return {
     company: ticker,
     ticker,
     baseline_date: baselineDate,
-    sec_filings: Array.isArray(filings)
-      ? filings.slice(0, MAX_FILINGS_FOR_LLM).map(entry=>({
-          form: entry.form,
-          filingDate: entry.filingDate,
-          reportDate: entry.reportDate
-        }))
-      : [],
-    price: {
-      value: toFloat(priceMeta?.value),
-      as_of: priceMeta?.as_of || baselineDate,
-      source: priceMeta?.source || null,
-      extended: priceMeta?.extended ? {
-        price: toFloat(priceMeta.extended.price),
-        change: toFloat(priceMeta.extended.change),
-        change_percent: toFloat(priceMeta.extended.change_percent),
-        session: priceMeta.extended.session,
-        as_of: priceMeta.extended.as_of
-      } : null
-    },
+    sec_filings: filingSummaries,
+    price: priceSummary,
     analyst_metrics: analystMetrics || null,
-    momentum: momentum ? {
-      score: momentum.score ?? null,
-      trend: momentum.trend || null,
-      returns: momentum.returns ? {
-        m3: toFloat(momentum.returns.m3),
-        m6: toFloat(momentum.returns.m6),
-        m12: toFloat(momentum.returns.m12)
-      } : null
-    } : null,
-    institutional: buildInstitutionalSignal(institutional),
-    news: buildNewsSignal(news),
-    earnings_call: buildEarningsSignal(earningsCall),
-    macro: buildMacroSignal(macro)
+    momentum: momentumSummary,
+    institutional: institutionalSummary,
+    news: newsSummary,
+    earnings_call: earningsSummary,
+    macro: macroSummary
   };
 }
 
@@ -1192,27 +1205,12 @@ function compactNewsBundle(bundle){
   };
 }
 
-function trimNewsForPayload(bundle, limit=NEWS_ARTICLE_LIMIT){
+function trimNewsForPayload(bundle){
   if(!bundle) return null;
-  const articles = Array.isArray(bundle.articles) ? bundle.articles : [];
-  const sampledArticles = articles.slice(0, limit);
   const sentiment = bundle.sentiment || {};
-  const supportingEvents = Array.isArray(sentiment.supporting_events)
-    ? sentiment.supporting_events.slice(0, NEWS_EVENT_LIMIT).map(ev=>({
-        title: ev.title || null,
-        note: ev.reason ? ev.reason.slice(0, 120) : null
-      }))
-    : [];
-  const topSources = Array.from(new Set(
-    sampledArticles.map(a=>(a.source || '').toUpperCase()).filter(Boolean)
-  )).slice(0,3);
   return {
-    keywords: Array.isArray(bundle.keywords) ? bundle.keywords.slice(0, NEWS_KEYWORD_LIMIT) : [],
     sentiment_label: sentiment.sentiment_label || null,
-    article_count: articles.length,
-    event_count: supportingEvents.length,
-    top_sources: topSources,
-    events: supportingEvents
+    summary: sentiment.summary ? sentiment.summary.slice(0, 220) : null
   };
 }
 
@@ -1619,6 +1617,10 @@ async function performAnalysis(ticker, date, opts={}){
     const aggregateCached = await readCache(aggregateKey, ANALYST_AGGREGATE_TTL_MS);
     if(aggregateCached) return aggregateCached;
 
+    if(analystSignalInflight.has(aggregateKey)){
+      return analystSignalInflight.get(aggregateKey);
+    }
+
     const includeExtended = baseAgeDays <= ANALYST_EXTENDED_WINDOW_DAYS;
     const fetchWithTtl = async ({ label, ttl, fetcher })=>{
       const key = `analyst_${label}_${upperTicker}`;
@@ -1649,24 +1651,32 @@ async function performAnalysis(ticker, date, opts={}){
       );
     }
 
-    const results = await Promise.all(tasks.map(task=>fetchWithTtl(task)));
-    const map = {};
-    tasks.forEach((task, idx)=>{ map[task.label] = results[idx]; });
+    const inflight = (async ()=>{
+      try{
+        const results = await Promise.all(tasks.map(task=>fetchWithTtl(task)));
+        const map = {};
+        tasks.forEach((task, idx)=>{ map[task.label] = results[idx]; });
 
-    const normalized = summarizeAnalystSignals({
-      summary: map.summary,
-      estimates: includeExtended ? { annual: map.est_ann, quarterly: map.est_q } : {},
-      ratingsSnapshot: map.rating_snap,
-      ratingsHistorical: map.rating_hist,
-      grades: includeExtended ? map.grades_latest : null,
-      gradesHistorical: includeExtended ? map.grades_hist : null,
-      gradesConsensus: includeExtended ? map.grades_cons : null
-    });
-    if(normalized){
-      await writeCache(aggregateKey, normalized);
-      return normalized;
-    }
-    return null;
+        const normalized = summarizeAnalystSignals({
+          summary: map.summary,
+          estimates: includeExtended ? { annual: map.est_ann, quarterly: map.est_q } : {},
+          ratingsSnapshot: map.rating_snap,
+          ratingsHistorical: map.rating_hist,
+          grades: includeExtended ? map.grades_latest : null,
+          gradesHistorical: includeExtended ? map.grades_hist : null,
+          gradesConsensus: includeExtended ? map.grades_cons : null
+        });
+        if(normalized){
+          await writeCache(aggregateKey, normalized);
+          return normalized;
+        }
+        return null;
+      }finally{
+        analystSignalInflight.delete(aggregateKey);
+      }
+    })();
+    analystSignalInflight.set(aggregateKey, inflight);
+    return inflight;
   })();
 
   const macroPromise = fetchMacroSnapshot(baselineDate);
