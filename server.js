@@ -16,7 +16,7 @@ import { getHistoricalPrice } from './lib/historicalPrice.js';
 import { getCachedAnalysis, saveAnalysisResult, deleteAnalysis, getStoredResult } from './lib/analysisStore.js';
 import { buildNewsBundle } from './lib/news.js';
 import { computeMomentumMetrics } from './lib/momentum.js';
-import { getFmpQuote, getFmpInstitutionalHolders, getFmpEarningsCallTranscript } from './lib/fmp.js';
+import { getFmpQuote, getFmpInstitutionalHolders, getFmpEarningsCallTranscript, getFmpPriceTargetSummary, getFmpAnalystEstimates, getFmpRatingsSnapshot, getFmpRatingsHistorical, getFmpGrades, getFmpGradesHistorical, getFmpGradesConsensus } from './lib/fmp.js';
 import { getYahooQuote } from './lib/yahoo.js';
 import { clearCacheForTicker, getCache as readCache, setCache as writeCache } from './lib/cache.js';
 import { summarizeMda } from './lib/mdaSummarizer.js';
@@ -58,9 +58,18 @@ const FILING_SUMMARY_TTL_MS = 180 * DAY_MS;
 const RETRY_ATTEMPTS = Number(process.env.API_RETRY_ATTEMPTS || 3);
 const RETRY_DELAY_MS = Number(process.env.API_RETRY_DELAY_MS || 1500);
 const NEWS_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-const MOMENTUM_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+const MOMENTUM_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const THIRTEENF_CACHE_TTL_MS = 30 * DAY_MS;
 const EARNINGS_CALL_TTL_MS = 30 * DAY_MS;
+const ANALYST_AGGREGATE_TTL_MS = 2 * 60 * 60 * 1000;
+const ANALYST_PRICE_TARGET_TTL_MS = 7 * DAY_MS;
+const ANALYST_ESTIMATES_TTL_MS = 14 * DAY_MS;
+const ANALYST_RATING_SNAPSHOT_TTL_MS = 7 * DAY_MS;
+const ANALYST_RATING_HISTORY_TTL_MS = 30 * DAY_MS;
+const ANALYST_GRADES_TTL_MS = 7 * DAY_MS;
+const ANALYST_GRADES_HISTORY_TTL_MS = 14 * DAY_MS;
+const ANALYST_GRADES_CONSENSUS_TTL_MS = 14 * DAY_MS;
+const ANALYST_GRADES_LOOKBACK_DAYS = Number(process.env.ANALYST_GRADES_LOOKBACK_DAYS || 90);
 const MAX_FILINGS_FOR_LLM = Math.max(1, Number(process.env.MAX_FILINGS_FOR_LLM || 2));
 const NEWS_ARTICLE_LIMIT = Math.max(1, Number(process.env.NEWS_ARTICLE_LIMIT || 4));
 const NEWS_EVENT_LIMIT = Math.max(1, Number(process.env.NEWS_EVENT_LIMIT || 3));
@@ -122,65 +131,7 @@ function slimValue(value, key){
 
 function buildSlimPayload(payload){
   if(!payload) return payload;
-  const compact = {
-    c: payload.company,
-    b: payload.baseline_date,
-    f: Array.isArray(payload.sec_filings)
-      ? payload.sec_filings.map(entry=>({
-          f: entry.form,
-          fd: entry.filingDate,
-          rd: entry.reportDate,
-          ms: entry.mda_summary,
-          mx: entry.mda_excerpt
-        }))
-      : null,
-    fh: payload.finnhub ? {
-      r: payload.finnhub.recommendation,
-      e: payload.finnhub.earnings,
-      q: payload.finnhub.quote,
-      pt: payload.finnhub.price_target,
-      pm: payload.finnhub.price_meta
-    } : null,
-    n: payload.news ? {
-      k: payload.news.keywords,
-      a: payload.news.articles,
-      s: payload.news.sentiment
-    } : null,
-    inst: payload.institutional ? {
-      s: payload.institutional.summary,
-      sig: payload.institutional.signal?.label,
-      top: Array.isArray(payload.institutional.top_holders)
-        ? payload.institutional.top_holders.map(holder=>({
-            n: holder.name,
-            w: holder.weight,
-            v: holder.value,
-            c: holder.change_shares
-          }))
-        : null
-    } : null,
-    ec: payload.earnings_call ? {
-      q: payload.earnings_call.quarter,
-      s: payload.earnings_call.summary,
-      b: Array.isArray(payload.earnings_call.bullets)
-        ? payload.earnings_call.bullets.map(item=>({ t:item.title, d:item.detail }))
-        : null
-    } : null,
-    m: payload.momentum ? {
-      s: payload.momentum.score,
-      t: payload.momentum.trend,
-      r: payload.momentum.returns ? {
-        q: toBps(payload.momentum.returns.m3),
-        h: toBps(payload.momentum.returns.m6),
-        y: toBps(payload.momentum.returns.m12)
-      } : null,
-      pm: payload.momentum.price_vs_ma,
-      e: payload.momentum.etf ? {
-        s: payload.momentum.etf.symbol,
-        r: toBps(payload.momentum.etf.return3m)
-      } : null
-    } : null
-  };
-  return slimValue(compact, '');
+  return slimValue(payload, '');
 }
 
 function toBps(value, scale=10000){
@@ -234,6 +185,149 @@ function formatPercent(val, digits=1){
   if(!Number.isFinite(num)) return '';
   const pct = num > 1 ? num : num * 100;
   return `${pct.toFixed(digits)}%`;
+}
+
+function parsePublishers(raw){
+  if(!raw) return [];
+  try{
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.slice(0, 10) : [];
+  }catch{
+    return [];
+  }
+}
+
+function summarizePriceTargetSummary(row){
+  if(!row) return null;
+  return {
+    last_month:{ count: row.lastMonthCount ?? null, avg: row.lastMonthAvgPriceTarget ?? null },
+    last_quarter:{ count: row.lastQuarterCount ?? null, avg: row.lastQuarterAvgPriceTarget ?? null },
+    last_year:{ count: row.lastYearCount ?? null, avg: row.lastYearAvgPriceTarget ?? null },
+    all_time:{ count: row.allTimeCount ?? null, avg: row.allTimeAvgPriceTarget ?? null },
+    publishers: parsePublishers(row.publishers)
+  };
+}
+
+function normalizeEstimateList(list, { take=5 }={}){
+  if(!Array.isArray(list) || !list.length) return [];
+  const sorted = [...list].sort((a,b)=> dayjs(a.date).valueOf() - dayjs(b.date).valueOf());
+  return sorted.slice(0, take).map(item=>({
+    date: item.date,
+    period: item.period || '',
+    revenueAvg: item.revenueAvg ?? null,
+    revenueHigh: item.revenueHigh ?? null,
+    revenueLow: item.revenueLow ?? null,
+    epsAvg: item.epsAvg ?? null,
+    epsHigh: item.epsHigh ?? null,
+    epsLow: item.epsLow ?? null,
+    numAnalystsRevenue: item.numAnalystsRevenue ?? null,
+    numAnalystsEps: item.numAnalystsEps ?? null
+  }));
+}
+
+function summarizeAnalystEstimates({ annual=[], quarterly=[] }={}){
+  const upcomingQuarterly = normalizeEstimateList(quarterly, { take:4 });
+  const forwardAnnual = normalizeEstimateList(annual, { take:4 });
+  if(!upcomingQuarterly.length && !forwardAnnual.length) return null;
+  return {
+    quarterly: upcomingQuarterly,
+    annual: forwardAnnual
+  };
+}
+
+function summarizeRatings({ snapshot, historical }){
+  if(!snapshot && (!Array.isArray(historical) || !historical.length)) return null;
+  const histSorted = Array.isArray(historical)
+    ? [...historical].sort((a,b)=> dayjs(b.date).valueOf() - dayjs(a.date).valueOf())
+    : [];
+  let trend = null;
+  let trendDelta = null;
+  let trendWindowDays = null;
+  if(histSorted.length >= 2){
+    const latest = histSorted[0];
+    const anchor = histSorted.find((entry, idx)=>{
+      if(idx === 0) return false;
+      const diffDays = Math.abs(dayjs(latest.date).diff(dayjs(entry.date), 'day'));
+      return diffDays >= 30;
+    }) || histSorted[histSorted.length-1];
+    if(latest?.overallScore!=null && anchor?.overallScore!=null){
+      const diff = latest.overallScore - anchor.overallScore;
+      trendDelta = diff;
+      trendWindowDays = Math.abs(dayjs(latest.date).diff(dayjs(anchor.date), 'day'));
+      trend = diff>0 ? 'up' : (diff<0 ? 'down' : 'flat');
+    }
+  }
+  return {
+    snapshot: snapshot ? {
+      rating: snapshot.rating,
+      overallScore: snapshot.overallScore,
+      discountedCashFlowScore: snapshot.discountedCashFlowScore,
+      returnOnEquityScore: snapshot.returnOnEquityScore,
+      returnOnAssetsScore: snapshot.returnOnAssetsScore,
+      debtToEquityScore: snapshot.debtToEquityScore,
+      priceToEarningsScore: snapshot.priceToEarningsScore,
+      priceToBookScore: snapshot.priceToBookScore
+    } : null,
+    historical: histSorted.slice(0,5).map(item=>({
+      date: item.date,
+      rating: item.rating,
+      overallScore: item.overallScore
+    })),
+    trend,
+    trend_delta: trendDelta,
+    trend_window_days: trendWindowDays
+  };
+}
+
+function summarizeGrades({ latest, historical, consensus }){
+  const recentActions = Array.isArray(latest)
+    ? latest.slice(0,5).map(item=>({
+        date: item.date,
+        gradingCompany: item.gradingCompany,
+        previousGrade: item.previousGrade,
+        newGrade: item.newGrade,
+        action: item.action
+      }))
+    : [];
+  let historicalCounts = null;
+  if(Array.isArray(historical) && historical.length){
+    const entry = historical[0];
+    historicalCounts = {
+      buy: entry.analystRatingsBuy ?? null,
+      hold: entry.analystRatingsHold ?? null,
+      sell: entry.analystRatingsSell ?? null,
+      strongSell: entry.analystRatingsStrongSell ?? null
+    };
+  }
+  return {
+    recent_actions: recentActions,
+    historical_counts: historicalCounts,
+    consensus: consensus ? {
+      strongBuy: consensus.strongBuy ?? null,
+      buy: consensus.buy ?? null,
+      hold: consensus.hold ?? null,
+      sell: consensus.sell ?? null,
+      strongSell: consensus.strongSell ?? null,
+      consensus: consensus.consensus || null
+    } : null
+  };
+}
+
+function summarizeAnalystSignals({ summary, estimates, ratingsSnapshot, ratingsHistorical, grades, gradesHistorical, gradesConsensus }){
+  const priceTargetSummary = summarizePriceTargetSummary(summary);
+  const estimateSummary = summarizeAnalystEstimates(estimates || {});
+  const ratingsSummary = summarizeRatings({ snapshot: ratingsSnapshot, historical: ratingsHistorical });
+  const gradesSummary = summarizeGrades({ latest: grades, historical: gradesHistorical, consensus: gradesConsensus });
+  const hasGrades = gradesSummary && (gradesSummary.recent_actions.length || gradesSummary.historical_counts || gradesSummary.consensus);
+  if(!priceTargetSummary && !estimateSummary && !ratingsSummary && !hasGrades){
+    return null;
+  }
+  return {
+    price_target_summary: priceTargetSummary,
+    estimates: estimateSummary,
+    ratings: ratingsSummary,
+    grades: gradesSummary
+  };
 }
 
 function summarizeInstitutionalRows(payload){
@@ -322,6 +416,211 @@ function summarizeInstitutionalRows(payload){
     top_holders: top,
     summary: summaryParts.filter(Boolean).join('；'),
     metrics: metaStats
+  };
+}
+
+function toFloat(val){
+  const num = Number(val);
+  return Number.isFinite(num) ? num : null;
+}
+
+function calcGrowth(nextVal, prevVal){
+  const nextNum = toFloat(nextVal);
+  const prevNum = toFloat(prevVal);
+  if(nextNum==null || prevNum==null || prevNum === 0) return null;
+  return (nextNum - prevNum) / Math.abs(prevNum);
+}
+
+function trendArrow(trend){
+  if(trend === 'up') return '↑';
+  if(trend === 'down') return '↓';
+  if(trend === 'flat') return '→';
+  return null;
+}
+
+const GRADE_ORDER = {
+  'strong buy': 6,
+  'outperform': 5,
+  'buy': 4,
+  'overweight': 4,
+  'accumulate': 4,
+  'market perform': 3,
+  'neutral': 3,
+  'hold': 3,
+  'equal weight': 3,
+  'underperform': 2,
+  'underweight': 2,
+  'sell': 1
+};
+
+function normalizeGradeLabel(label){
+  if(!label) return '';
+  return String(label).trim().toLowerCase();
+}
+
+function deriveGradeDirection(prevGrade, nextGrade){
+  const prev = GRADE_ORDER[normalizeGradeLabel(prevGrade)];
+  const next = GRADE_ORDER[normalizeGradeLabel(nextGrade)];
+  if(next == null || prev == null) return null;
+  if(next > prev) return 'upgrade';
+  if(next < prev) return 'downgrade';
+  return null;
+}
+
+function buildGradeStats(grades){
+  if(!grades) return null;
+  const cutoff = dayjs().subtract(ANALYST_GRADES_LOOKBACK_DAYS, 'day');
+  let upgrades = 0;
+  let downgrades = 0;
+  const actions = Array.isArray(grades.recent_actions) ? grades.recent_actions : [];
+  actions.forEach(item=>{
+    const date = item.date ? dayjs(item.date) : null;
+    if(date?.isValid() && date.isBefore(cutoff)) return;
+    const actionLabel = (item.action || '').toLowerCase();
+    let direction = null;
+    if(/upgrade|raised|overweight|buy/.test(actionLabel)) direction = 'upgrade';
+    else if(/downgrade|lowered|underweight|sell/.test(actionLabel)) direction = 'downgrade';
+    if(!direction){
+      direction = deriveGradeDirection(item.previousGrade, item.newGrade);
+    }
+    if(direction === 'upgrade') upgrades++;
+    if(direction === 'downgrade') downgrades++;
+  });
+  const consensus = grades.consensus || null;
+  return {
+    upgrades_90d: upgrades,
+    downgrades_90d: downgrades,
+    diff_90d: upgrades - downgrades,
+    consensus_label: consensus?.consensus || null
+  };
+}
+
+function buildEstimateStats(estimates){
+  if(!estimates) return null;
+  const quarterly = Array.isArray(estimates.quarterly) ? estimates.quarterly : [];
+  const annual = Array.isArray(estimates.annual) ? estimates.annual : [];
+  const nextQuarter = quarterly[0] || null;
+  const prevQuarter = quarterly[1] || null;
+  const nextYear = annual[0] || null;
+  const prevYear = annual[1] || null;
+  const summary = (entry)=> entry ? {
+    period: entry.period || entry.date || null,
+    eps_avg: toFloat(entry.epsAvg),
+    revenue_avg: toFloat(entry.revenueAvg)
+  } : { period:null, eps_avg:null, revenue_avg:null };
+  return {
+    quarterly:{
+      ...summary(nextQuarter),
+      eps_growth: calcGrowth(nextQuarter?.epsAvg, prevQuarter?.epsAvg),
+      revenue_growth: calcGrowth(nextQuarter?.revenueAvg, prevQuarter?.revenueAvg)
+    },
+    annual:{
+      ...summary(nextYear),
+      eps_growth: calcGrowth(nextYear?.epsAvg, prevYear?.epsAvg),
+      revenue_growth: calcGrowth(nextYear?.revenueAvg, prevYear?.revenueAvg)
+    }
+  };
+}
+
+function buildPriceTargetStats(summary){
+  if(!summary) return null;
+  const monthAvg = toFloat(summary.last_month?.avg);
+  const quarterAvg = toFloat(summary.last_quarter?.avg);
+  const yearAvg = toFloat(summary.last_year?.avg);
+  const recentAvg = monthAvg ?? quarterAvg ?? yearAvg ?? toFloat(summary.all_time?.avg);
+  return {
+    month_avg: monthAvg,
+    month_count: summary.last_month?.count ?? null,
+    quarter_avg: quarterAvg,
+    quarter_count: summary.last_quarter?.count ?? null,
+    year_avg: yearAvg,
+    year_count: summary.last_year?.count ?? null,
+    recent_avg: recentAvg
+  };
+}
+
+function buildRatingStats(ratings){
+  if(!ratings) return null;
+  return {
+    latest: ratings.snapshot?.rating || null,
+    score: toFloat(ratings.snapshot?.overallScore),
+    trend: ratings.trend || null,
+    trend_arrow: trendArrow(ratings.trend),
+    trend_delta: toFloat(ratings.trend_delta),
+    window_days: ratings.trend_window_days ?? null
+  };
+}
+
+function buildAnalystMetrics(signals){
+  if(!signals) return null;
+  return {
+    price_targets: buildPriceTargetStats(signals.price_target_summary),
+    estimates: buildEstimateStats(signals.estimates),
+    rating: buildRatingStats(signals.ratings),
+    grades: buildGradeStats(signals.grades)
+  };
+}
+
+function buildNewsSignal(bundle){
+  if(!bundle) return null;
+  const sentiment = bundle.sentiment || {};
+  return {
+    sentiment_label: sentiment.sentiment_label || null,
+    sentiment_score: toFloat(sentiment.score),
+    keywords: Array.isArray(bundle.keywords) ? bundle.keywords.slice(0,3) : [],
+    event_count: Array.isArray(sentiment.supporting_events) ? sentiment.supporting_events.length : 0
+  };
+}
+
+function buildInstitutionalSignal(institutional){
+  if(!institutional) return null;
+  return {
+    signal: institutional.signal?.label || null,
+    net_shares: institutional.signal?.net_shares ?? null,
+    ownership_percent: institutional.metrics?.ownership_percent ?? null,
+    investors_holding: institutional.metrics?.investors_holding ?? null
+  };
+}
+
+function buildEarningsSignal(earningsCall){
+  if(!earningsCall) return null;
+  return {
+    quarter: earningsCall.quarter || null,
+    bullet_count: Array.isArray(earningsCall.bullets) ? earningsCall.bullets.length : 0,
+    date: earningsCall.date || null
+  };
+}
+
+function buildNumericPayload({ ticker, baselineDate, filings, priceMeta, analystMetrics, momentum, institutional, news, earningsCall }){
+  return {
+    company: ticker,
+    ticker,
+    baseline_date: baselineDate,
+    sec_filings: Array.isArray(filings)
+      ? filings.slice(0, MAX_FILINGS_FOR_LLM).map(entry=>({
+          form: entry.form,
+          filingDate: entry.filingDate,
+          reportDate: entry.reportDate
+        }))
+      : [],
+    price: {
+      value: toFloat(priceMeta?.value),
+      as_of: priceMeta?.as_of || baselineDate,
+      source: priceMeta?.source || null
+    },
+    analyst_metrics: analystMetrics || null,
+    momentum: momentum ? {
+      score: momentum.score ?? null,
+      trend: momentum.trend || null,
+      returns: momentum.returns ? {
+        m3: toFloat(momentum.returns.m3),
+        m6: toFloat(momentum.returns.m6),
+        m12: toFloat(momentum.returns.m12)
+      } : null
+    } : null,
+    institutional: buildInstitutionalSignal(institutional),
+    news: buildNewsSignal(news),
+    earnings_call: buildEarningsSignal(earningsCall)
   };
 }
 
@@ -570,14 +869,14 @@ async function performAnalysis(ticker, date, opts={}){
   const storedUpdatedAt = storedRecord?.updated_at || 0;
   const nowTs = Date.now();
   const storedFreshForAnalysis = storedRecord ? (nowTs - storedUpdatedAt) <= analysisTtl : false;
-  const storedFinnhub = storedFreshForAnalysis ? storedResult?.inputs?.finnhub : null;
-  const storedSecFilings = storedFreshForAnalysis ? storedResult?.inputs?.sec_filings : null;
+  const storedFinnhub = storedFreshForAnalysis ? storedResult?.fetched?.finnhub_summary : null;
+  const storedSecFilings = storedFreshForAnalysis ? storedResult?.per_filing_summaries : null;
   const storedNewsFresh = storedRecord ? (nowTs - storedUpdatedAt) <= NEWS_CACHE_TTL_MS : false;
   const storedMomentumFresh = storedRecord ? (nowTs - storedUpdatedAt) <= MOMENTUM_CACHE_TTL_MS : false;
-  const storedNews = storedNewsFresh ? storedResult?.inputs?.news : null;
-  const storedMomentum = storedMomentumFresh ? storedResult?.inputs?.momentum : null;
-  const storedInstitutional = storedFreshForAnalysis ? storedResult?.inputs?.institutional : null;
-  const storedEarningsCall = storedFreshForAnalysis ? storedResult?.inputs?.earnings_call : null;
+  const storedNews = storedNewsFresh ? storedResult?.news : null;
+  const storedMomentum = storedMomentumFresh ? storedResult?.momentum : null;
+  const storedInstitutional = storedFreshForAnalysis ? storedResult?.institutional : null;
+  const storedEarningsCall = storedFreshForAnalysis ? storedResult?.earnings_call : null;
   if(preferCacheOnly && storedFreshForAnalysis && storedResult){
     return storedResult;
   }
@@ -899,12 +1198,94 @@ async function performAnalysis(ticker, date, opts={}){
     return null;
   })();
 
-  const [finnhubSnapshot, newsCompact, momentum, institutional, earningsCall] = await Promise.all([
+  const analystSignalsPromise = (async ()=>{
+    if(!FMP_KEY) return null;
+    const aggregateKey = `analyst_signals_${upperTicker}`;
+    const aggregateCached = await readCache(aggregateKey, ANALYST_AGGREGATE_TTL_MS);
+    if(aggregateCached) return aggregateCached.__empty ? null : aggregateCached;
+
+    const fetchWithTtl = async ({ label, ttl, fetcher })=>{
+      const key = `analyst_${label}_${upperTicker}`;
+      const memo = await readCache(key, ttl);
+      if(memo) return memo.__empty ? null : memo;
+      try{
+        const data = await fetcher();
+        await writeCache(key, data ?? { __empty:true });
+        return data ?? null;
+      }catch(err){
+        console.warn(`[AnalystSignals:${label}]`, err.message);
+        await writeCache(key, { __empty:true });
+        return null;
+      }
+    };
+
+    const [summary, estimatesAnnual, estimatesQuarterly, ratingSnapshot, ratingHistorical, gradesLatest, gradesHistorical, gradesConsensus] = await Promise.all([
+      fetchWithTtl({
+        label:'pts',
+        ttl: ANALYST_PRICE_TARGET_TTL_MS,
+        fetcher: ()=>getFmpPriceTargetSummary(upperTicker, FMP_KEY)
+      }),
+      fetchWithTtl({
+        label:'est_ann',
+        ttl: ANALYST_ESTIMATES_TTL_MS,
+        fetcher: ()=>getFmpAnalystEstimates({ symbol: upperTicker, period:'annual', limit:12 }, FMP_KEY)
+      }),
+      fetchWithTtl({
+        label:'est_q',
+        ttl: ANALYST_ESTIMATES_TTL_MS,
+        fetcher: ()=>getFmpAnalystEstimates({ symbol: upperTicker, period:'quarter', limit:12 }, FMP_KEY)
+      }),
+      fetchWithTtl({
+        label:'rating_snap',
+        ttl: ANALYST_RATING_SNAPSHOT_TTL_MS,
+        fetcher: ()=>getFmpRatingsSnapshot(upperTicker, FMP_KEY)
+      }),
+      fetchWithTtl({
+        label:'rating_hist',
+        ttl: ANALYST_RATING_HISTORY_TTL_MS,
+        fetcher: ()=>getFmpRatingsHistorical({ symbol: upperTicker, limit:6 }, FMP_KEY)
+      }),
+      fetchWithTtl({
+        label:'grades_latest',
+        ttl: ANALYST_GRADES_TTL_MS,
+        fetcher: ()=>getFmpGrades(upperTicker, FMP_KEY)
+      }),
+      fetchWithTtl({
+        label:'grades_hist',
+        ttl: ANALYST_GRADES_HISTORY_TTL_MS,
+        fetcher: ()=>getFmpGradesHistorical({ symbol: upperTicker, limit:1 }, FMP_KEY)
+      }),
+      fetchWithTtl({
+        label:'grades_cons',
+        ttl: ANALYST_GRADES_CONSENSUS_TTL_MS,
+        fetcher: ()=>getFmpGradesConsensus(upperTicker, FMP_KEY)
+      })
+    ]);
+
+    const normalized = summarizeAnalystSignals({
+      summary,
+      estimates: { annual: estimatesAnnual, quarterly: estimatesQuarterly },
+      ratingsSnapshot: ratingSnapshot,
+      ratingsHistorical: ratingHistorical,
+      grades: gradesLatest,
+      gradesHistorical,
+      gradesConsensus
+    });
+    if(normalized){
+      await writeCache(aggregateKey, normalized);
+      return normalized;
+    }
+    await writeCache(aggregateKey, { __empty:true });
+    return null;
+  })();
+
+  const [finnhubSnapshot, newsCompact, momentum, institutional, earningsCall, analystSignals] = await Promise.all([
     finnhubPromise,
     newsPromise,
     momentumPromise,
     institutionalPromise,
-    earningsCallPromise
+    earningsCallPromise,
+    analystSignalsPromise
   ]);
 
   const priceMeta = finnhubSnapshot?.price_meta || {
@@ -915,31 +1296,19 @@ async function performAnalysis(ticker, date, opts={}){
   };
   const ptAgg = finnhubSnapshot?.price_target || null;
 
-  const payload = {
-    company: upperTicker,
-    baseline_date: baselineDate,
-    sec_filings: perFiling.slice(0, filingLimit).map(x=>{
-      const entry = {
-        form: x.form,
-        form_label: x.formLabel || x.form,
-        filingDate: x.filingDate,
-        reportDate: x.reportDate,
-        mda_summary: x.mda_summary
-      };
-      if(x.summary_kind === 'fallback' && x.mda_excerpt){
-        entry.mda_excerpt = x.mda_excerpt;
-      }
-      return entry;
-    }),
-    finnhub: finnhubSnapshot,
+  const analystMetrics = buildAnalystMetrics(analystSignals);
+  const llmNews = trimNewsForPayload(newsCompact, effectiveNewsLimit);
+  const llmPayload = buildNumericPayload({
+    ticker: upperTicker,
+    baselineDate,
+    filings: perFiling,
+    priceMeta,
+    analystMetrics,
+    momentum,
     institutional,
-    earnings_call: earningsCall
-  };
-
-  payload.news = trimNewsForPayload(newsCompact, effectiveNewsLimit);
-  payload.momentum = momentum;
-  payload.institutional = institutional;
-  payload.earnings_call = earningsCall;
+    news: llmNews,
+    earningsCall
+  });
   let llm = null;
   let llmUsage = null;
   if(skipLlm){
@@ -947,7 +1316,7 @@ async function performAnalysis(ticker, date, opts={}){
     llmUsage = storedResult?.llm_usage || null;
   }else{
     const llmTtlMs = Math.min(effectiveLlmCacheTtl, analysisTtl);
-    const slimPayload = buildSlimPayload(payload) || payload;
+    const slimPayload = buildSlimPayload(llmPayload) || llmPayload;
     llm = await analyzeWithLLM(OPENAI_KEY, llmModel, slimPayload, {
       cacheTtlMs: llmTtlMs,
       promptVersion: 'profile_v2',
@@ -970,14 +1339,10 @@ async function performAnalysis(ticker, date, opts={}){
     momentum,
     institutional,
     earnings_call: earningsCall,
-    inputs:{
-      sec_filings: perFiling,
-      finnhub: finnhubSnapshot,
-      news: newsCompact,
-      momentum,
-      institutional,
-      earnings_call: earningsCall
-    }
+    analyst_signals: analystSignals,
+    per_filing_summaries: perFiling,
+    analyst_metrics: analystMetrics,
+    inputs: llmPayload
   };
   saveAnalysisResult({ ticker: upperTicker, baselineDate, isHistorical, model: cacheModelKey, result });
   return result;
@@ -1126,6 +1491,16 @@ app.post('/api/batch', upload.single('file'), async (req,res)=>{
       const momentum = result.momentum || {};
       const institutional = result.institutional;
       const earningsCall = result.earnings_call;
+      const analystSignals = result.analyst_signals;
+      const analystMetrics = result.analyst_metrics || buildAnalystMetrics(analystSignals);
+      const ptSummary = analystSignals?.price_target_summary;
+      const ratingSnapshot = analystSignals?.ratings?.snapshot;
+      const gradeConsensus = analystSignals?.grades?.consensus;
+      const recentAvgTarget = analystMetrics?.price_targets?.recent_avg ?? ptSummary?.last_month?.avg ?? '';
+      const gradesDiff = analystMetrics?.grades?.diff_90d ?? '';
+      const ratingTrendArrow = analystMetrics?.rating
+        ? [analystMetrics.rating.latest || '', analystMetrics.rating.trend_arrow || ''].filter(Boolean).join(' ')
+        : (analystSignals?.ratings?.trend || '');
       return {
         ticker: result.input.ticker,
         date: task.date,
@@ -1138,10 +1513,18 @@ app.post('/api/batch', upload.single('file'), async (req,res)=>{
         news_sentiment: newsSent?.sentiment_label || '',
         momentum_score: momentum.score ?? '',
         trend_flag: momentum.trend || '',
-        institutional_signal: institutional?.signal?.label || institutional?.summary || ''
+        institutional_signal: institutional?.signal?.label || institutional?.summary || '',
+        pt_recent_month_avg: ptSummary?.last_month?.avg ?? '',
+        pt_recent_quarter_avg: ptSummary?.last_quarter?.avg ?? '',
+        analyst_rating: ratingSnapshot?.rating || '',
+        analyst_rating_trend: analystSignals?.ratings?.trend || '',
+        analyst_grade_consensus: gradeConsensus?.consensus || '',
+        recent_avg_target: recentAvgTarget ?? '',
+        grades_diff: gradesDiff ?? '',
+        rating_trend: ratingTrendArrow || ''
       };
     });
-    const fields = ['ticker','date','model','current_price','llm_target_price','recommendation','segment','quality_score','news_sentiment','momentum_score','trend_flag','institutional_signal'];
+    const fields = ['ticker','date','model','current_price','llm_target_price','recommendation','segment','quality_score','news_sentiment','momentum_score','trend_flag','institutional_signal','pt_recent_month_avg','pt_recent_quarter_avg','analyst_rating','analyst_rating_trend','analyst_grade_consensus','recent_avg_target','grades_diff','rating_trend'];
     const csv = Papa.unparse({
       fields,
       data: rows.map(r=>fields.map(f=>r[f]))

@@ -97,6 +97,11 @@ canvas{background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:10
       <div class="kpi"><h3>新聞情緒</h3><p id="newsSentiment">-</p></div>
       <div class="kpi"><h3>動能評分</h3><p id="momentumScore">-</p></div>
       <div class="kpi"><h3>趨勢走向</h3><p id="trendFlag">-</p></div>
+      <div class="kpi"><h3>近月共識價</h3><p id="ptRecentMonth">-</p></div>
+      <div class="kpi"><h3>近季共識價</h3><p id="ptRecentQuarter">-</p></div>
+      <div class="kpi"><h3>評級趨勢</h3><p id="ratingTrendKpi">-</p></div>
+      <div class="kpi"><h3>下一季 EPS / Revenue</h3><p id="estNextQuarter">-</p></div>
+      <div class="kpi"><h3>下一年 EPS / Revenue</h3><p id="estNextYear">-</p></div>
     </div>
   </div>
 
@@ -127,6 +132,12 @@ canvas{background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:10
     <h3 style="margin:0 0 8px">新聞情緒與摘要</h3>
     <div id="newsSummary" class="summary muted">尚無新聞</div>
     <div id="newsArticles" class="summary" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h3 style="margin:0 0 8px">分析師概況</h3>
+    <div id="analystSummary" class="summary muted">尚無分析師資料</div>
+    <div id="analystDetail" class="summary" style="margin-top:8px"></div>
   </div>
   <div class="card" style="margin-top:16px">
     <h3 style="margin:0 0 8px">機構持股（13F）</h3>
@@ -302,6 +313,79 @@ function formatMillions(value){
   return num.toFixed(0);
 }
 
+function formatUsd(value, digits=2){
+  const num = toNum(value);
+  return Number.isFinite(num) ? `$${num.toFixed(digits)}` : '-';
+}
+
+function formatEstimatePair(snapshot){
+  if(!snapshot) return '-';
+  const eps = toNum(snapshot.eps_avg);
+  const rev = toNum(snapshot.revenue_avg);
+  const epsLabel = Number.isFinite(eps) ? eps.toFixed(2) : '-';
+  const revLabel = Number.isFinite(rev) ? formatMillions(rev) : '-';
+  return `EPS ${epsLabel} / Rev ${revLabel}`;
+}
+
+function formatGrowthLabel(value){
+  const num = toNum(value);
+  if(!Number.isFinite(num)) return '';
+  return `${(num*100).toFixed(1)}%`;
+}
+
+function normalizeAnalystMetrics(source){
+  if(!source) return null;
+  if(source.price_targets || source.estimates || source.rating || source.grades){
+    return source;
+  }
+  const summary = source.price_target_summary || {};
+  const priceTargets = (summary.last_month || summary.last_quarter || summary.last_year) ? {
+    month_avg: toNum(summary.last_month?.avg),
+    month_count: summary.last_month?.count ?? null,
+    quarter_avg: toNum(summary.last_quarter?.avg),
+    quarter_count: summary.last_quarter?.count ?? null,
+    year_avg: toNum(summary.last_year?.avg),
+    year_count: summary.last_year?.count ?? null
+  } : null;
+  const estQuarter = Array.isArray(source.estimates?.quarterly) ? source.estimates.quarterly[0] : null;
+  const estAnnual = Array.isArray(source.estimates?.annual) ? source.estimates.annual[0] : null;
+  const estimates = (estQuarter || estAnnual) ? {
+    quarterly:{
+      period: estQuarter?.period || estQuarter?.date || null,
+      eps_avg: toNum(estQuarter?.epsAvg),
+      revenue_avg: toNum(estQuarter?.revenueAvg)
+    },
+    annual:{
+      period: estAnnual?.period || estAnnual?.date || null,
+      eps_avg: toNum(estAnnual?.epsAvg),
+      revenue_avg: toNum(estAnnual?.revenueAvg)
+    }
+  } : null;
+  const trend = source.ratings?.trend || null;
+  const rating = source.ratings ? {
+    latest: source.ratings?.snapshot?.rating || null,
+    trend,
+    trend_arrow: trend === 'up' ? '↑' : trend === 'down' ? '↓' : trend ? '→' : '',
+    score: toNum(source.ratings?.snapshot?.overallScore)
+  } : null;
+  const actions = Array.isArray(source.grades?.recent_actions) ? source.grades.recent_actions : [];
+  const upgrades = actions.filter(item=> /upgrade|raised/i.test(item.action || '')).length;
+  const downgrades = actions.filter(item=> /downgrade|lower/i.test(item.action || '')).length;
+  const grades = actions.length ? {
+    upgrades_90d: upgrades,
+    downgrades_90d: downgrades,
+    diff_90d: upgrades - downgrades,
+    consensus_label: source.grades?.consensus?.consensus || null
+  } : null;
+  if(!priceTargets && !estimates && !rating && !grades) return null;
+  return {
+    price_targets: priceTargets,
+    estimates,
+    rating,
+    grades
+  };
+}
+
 function normalizeInputDate(raw){
   if(!raw) return '';
   const replaced = raw.replace(/\//g,'-');
@@ -339,7 +423,7 @@ function setRefreshState(state){
   refreshBtn.disabled = state !== 'enabled';
 }
 
-function setKPIs(quote, pt, priceMeta, action, profile, news, momentum){
+function setKPIs(quote, pt, priceMeta, action, profile, news, momentum, analystMetricsRaw){
   const last = toNum(priceMeta?.value ?? quote?.c);
   const targets = ensureTargets(pt, last);
   const priceLabel = last? ('$'+last.toFixed(2)) : '-';
@@ -358,6 +442,16 @@ function setKPIs(quote, pt, priceMeta, action, profile, news, momentum){
   newsSentimentEl.textContent = news?.sentiment?.sentiment_label || '-';
   momentumScoreEl.textContent = toNum(momentum?.score) != null ? Math.round(momentum.score) : '-';
   trendFlagEl.textContent = momentum?.trend || '-';
+  const analystMetrics = normalizeAnalystMetrics(analystMetricsRaw);
+  const ptSnap = analystMetrics?.price_targets || {};
+  ptRecentMonthEl.textContent = ptSnap.month_avg!=null ? formatUsd(ptSnap.month_avg) : '-';
+  ptRecentQuarterEl.textContent = ptSnap.quarter_avg!=null ? formatUsd(ptSnap.quarter_avg) : '-';
+  const ratingLine = analystMetrics?.rating
+    ? [analystMetrics.rating.latest || '-', analystMetrics.rating.trend_arrow || ''].filter(Boolean).join(' ')
+    : '-';
+  ratingTrendKpiEl.textContent = ratingLine || '-';
+  estNextQuarterEl.textContent = analystMetrics?.estimates ? formatEstimatePair(analystMetrics.estimates.quarterly) : '-';
+  estNextYearEl.textContent = analystMetrics?.estimates ? formatEstimatePair(analystMetrics.estimates.annual) : '-';
 }
 
 function renderTimeline(perFiling){
@@ -579,6 +673,59 @@ function renderEarningsCall(data){
   }
 }
 
+function renderAnalystSignals(rawData){
+  clearChildren(analystSummaryEl);
+  clearChildren(analystDetailEl);
+  const data = normalizeAnalystMetrics(rawData);
+  if(!data){
+    appendLine(analystSummaryEl, '尚無分析師資料', 'muted');
+    return;
+  }
+  const summaryParts = [];
+  if(data.price_targets?.month_avg!=null){
+    summaryParts.push(`近月 ${formatUsd(data.price_targets.month_avg)} (${data.price_targets.month_count ?? 0}筆)`);
+  }
+  if(data.price_targets?.quarter_avg!=null){
+    summaryParts.push(`近季 ${formatUsd(data.price_targets.quarter_avg)} (${data.price_targets.quarter_count ?? 0}筆)`);
+  }
+  if(data.price_targets?.year_avg!=null){
+    summaryParts.push(`近年 ${formatUsd(data.price_targets.year_avg)} (${data.price_targets.year_count ?? 0}筆)`);
+  }
+  appendLine(analystSummaryEl, summaryParts.length ? summaryParts.join(' ｜ ') : '目標價資料有限，僅供參考。', summaryParts.length ? '' : 'muted');
+
+  const detailLines = [];
+  if(data.rating){
+    const ratingText = [data.rating.latest || '-', data.rating.trend_arrow || ''].filter(Boolean).join(' ');
+    const deltaText = data.rating.trend_delta!=null
+      ? `${(data.rating.trend_delta).toFixed(1)} 分 / ${data.rating.window_days || '?'}天`
+      : '';
+    detailLines.push(`評級：${ratingText} ${deltaText}`.trim());
+  }
+  if(data.estimates?.quarterly){
+    detailLines.push(`下一季 ${data.estimates.quarterly.period || ''} ${formatEstimatePair(data.estimates.quarterly)}`);
+    if(data.estimates.quarterly.eps_growth!=null || data.estimates.quarterly.revenue_growth!=null){
+      detailLines.push(`• 成長率 EPS ${formatGrowthLabel(data.estimates.quarterly.eps_growth) || '-'} / Revenue ${formatGrowthLabel(data.estimates.quarterly.revenue_growth) || '-'}`);
+    }
+  }
+  if(data.estimates?.annual){
+    detailLines.push(`下一年 ${data.estimates.annual.period || ''} ${formatEstimatePair(data.estimates.annual)}`);
+    if(data.estimates.annual.eps_growth!=null || data.estimates.annual.revenue_growth!=null){
+      detailLines.push(`• 成長率 EPS ${formatGrowthLabel(data.estimates.annual.eps_growth) || '-'} / Revenue ${formatGrowthLabel(data.estimates.annual.revenue_growth) || '-'}`);
+    }
+  }
+  if(data.grades){
+    detailLines.push(`近90天 升評 ${data.grades.upgrades_90d ?? 0} / 降評 ${data.grades.downgrades_90d ?? 0}（淨 ${data.grades.diff_90d ?? 0}）`);
+    if(data.grades.consensus_label){
+      detailLines.push(`券商共識：${data.grades.consensus_label}`);
+    }
+  }
+  if(!detailLines.length){
+    appendLine(analystDetailEl, '尚無可用的詳細資訊', 'muted');
+  }else{
+    detailLines.forEach(line=> appendLine(analystDetailEl, line, line.startsWith('•') ? 'muted' : ''));
+  }
+}
+
 function renderHistory(){
   clearChildren(historyListEl);
   if(!analysisHistory.length){
@@ -654,6 +801,11 @@ const goBtn = document.getElementById('go');
 const stopBtn = document.getElementById('stop');
 const momentumScoreEl = document.getElementById('momentumScore');
 const trendFlagEl = document.getElementById('trendFlag');
+const ptRecentMonthEl = document.getElementById('ptRecentMonth');
+const ptRecentQuarterEl = document.getElementById('ptRecentQuarter');
+const ratingTrendKpiEl = document.getElementById('ratingTrendKpi');
+const estNextQuarterEl = document.getElementById('estNextQuarter');
+const estNextYearEl = document.getElementById('estNextYear');
 const momentumSummaryEl = document.getElementById('momentumSummary');
 const momentumDetailEl = document.getElementById('momentumDetail');
 const newsSentimentEl = document.getElementById('newsSentiment');
@@ -663,6 +815,8 @@ const instSummaryEl = document.getElementById('instSummary');
 const instDetailEl = document.getElementById('instDetail');
 const callSummaryEl = document.getElementById('callSummary');
 const callDetailEl = document.getElementById('callDetail');
+const analystSummaryEl = document.getElementById('analystSummary');
+const analystDetailEl = document.getElementById('analystDetail');
 const historyListEl = document.getElementById('historyList');
 const refreshBtn = document.getElementById('refreshCache');
 const refreshLabel = refreshBtn?.textContent || '重新抓取';
@@ -687,6 +841,7 @@ renderNews(null);
 renderInstitutional(null);
 renderEarningsCall(null);
 renderMomentum(null);
+renderAnalystSignals(null);
 renderHistory();
 setRefreshState('disabled');
 
@@ -754,6 +909,12 @@ async function analyze(){
       return;
     }
 
+    const analystMetrics = normalizeAnalystMetrics(
+      j?.analyst_metrics
+      || j?.inputs?.analyst_metrics
+      || j?.analyst_signals
+      || j?.inputs?.analyst_signals
+    );
     setKPIs(
       j?.fetched?.finnhub_summary?.quote,
       j?.fetched?.finnhub_summary?.price_target,
@@ -761,12 +922,13 @@ async function analyze(){
       j?.analysis?.action,
       j?.analysis?.profile,
       j?.news,
-      j?.momentum
+      j?.momentum,
+      analystMetrics
     );
     const filingsMeta = j?.fetched?.filings || [];
     const rawTimeline = (j?.analysis?.per_filing && j.analysis.per_filing.length)
       ? j.analysis.per_filing
-      : (j?.inputs?.sec_filings || []);
+      : (j?.per_filing_summaries || j?.inputs?.sec_filings || []);
     const timelineData = rawTimeline.map((f,i)=>{
       const meta = filingsMeta[i] || {};
       return {
@@ -782,6 +944,7 @@ async function analyze(){
     renderInstitutional(j?.institutional);
     renderEarningsCall(j?.earnings_call);
     renderMomentum(j?.momentum);
+    renderAnalystSignals(analystMetrics);
     const newsLabel = j?.news?.sentiment?.sentiment_label ? `新聞：${j.news.sentiment.sentiment_label}` : '';
     const momentumLabel = j?.momentum?.trend ? `動能：${j.momentum.trend}` : '';
     const baseSummary = j?.analysis?.consensus_view?.summary || j?.analysis?.action?.rationale || j?.news?.sentiment?.summary || '（尚無摘要）';
