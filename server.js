@@ -81,7 +81,7 @@ const NEWS_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const MOMENTUM_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const THIRTEENF_CACHE_TTL_MS = 30 * DAY_MS;
 const EARNINGS_CALL_TTL_MS = 30 * DAY_MS;
-const ANALYST_AGGREGATE_TTL_MS = 2 * 60 * 60 * 1000;
+const ANALYST_AGGREGATE_TTL_MS = Number(process.env.ANALYST_AGGREGATE_TTL_HOURS || 24) * 60 * 60 * 1000;
 const ANALYST_PRICE_TARGET_TTL_MS = 7 * DAY_MS;
 const ANALYST_ESTIMATES_TTL_MS = 14 * DAY_MS;
 const ANALYST_RATING_SNAPSHOT_TTL_MS = 7 * DAY_MS;
@@ -89,6 +89,8 @@ const ANALYST_RATING_HISTORY_TTL_MS = 30 * DAY_MS;
 const ANALYST_GRADES_TTL_MS = 7 * DAY_MS;
 const ANALYST_GRADES_HISTORY_TTL_MS = 14 * DAY_MS;
 const ANALYST_GRADES_CONSENSUS_TTL_MS = 14 * DAY_MS;
+const ANALYST_DATA_MAX_AGE_DAYS = Number(process.env.ANALYST_DATA_MAX_AGE_DAYS || 540);
+const ANALYST_EXTENDED_WINDOW_DAYS = Number(process.env.ANALYST_EXTENDED_WINDOW_DAYS || 120);
 const ANALYST_GRADES_LOOKBACK_DAYS = Number(process.env.ANALYST_GRADES_LOOKBACK_DAYS || 90);
 const AFTERMARKET_CACHE_TTL_MS = Number(process.env.AFTERMARKET_CACHE_TTL_MS || 60) * 1000;
 const INSIDER_CACHE_TTL_MS = Number(process.env.INSIDER_CACHE_TTL_HOURS || 3) * 60 * 60 * 1000;
@@ -104,6 +106,12 @@ const NEWS_KEYWORD_LIMIT = Math.max(1, Number(process.env.NEWS_KEYWORD_LIMIT || 
 const PREWARM_TICKERS = (process.env.PREWARM_TICKERS || '').split(',').map(t=>t.trim()).filter(Boolean);
 const PREWARM_INTERVAL_HOURS = Number(process.env.PREWARM_INTERVAL_HOURS || 6);
 const PREWARM_INCLUDE_LLM = process.env.PREWARM_INCLUDE_LLM === 'true';
+const INSIDER_LOOKBACK_DAYS = Number(process.env.INSIDER_LOOKBACK_DAYS || 90);
+const INSIDER_LOOKAHEAD_DAYS = Number(process.env.INSIDER_LOOKAHEAD_DAYS || 7);
+const INSIDER_MAX_AGE_DAYS = Number(process.env.INSIDER_MAX_AGE_DAYS || 540);
+const ANALYST_ACTION_LOOKBACK_DAYS = Number(process.env.ANALYST_ACTION_LOOKBACK_DAYS || 90);
+const ANALYST_ACTION_LOOKAHEAD_DAYS = Number(process.env.ANALYST_ACTION_LOOKAHEAD_DAYS || 7);
+const ANALYST_ACTION_MAX_AGE_DAYS = Number(process.env.ANALYST_ACTION_MAX_AGE_DAYS || 540);
 const REALTIME_QUOTE_TTL_MS = Number(process.env.REALTIME_QUOTE_TTL_MS || 15) * 1000;
 
 const realtimeQuoteCache = new Map();
@@ -262,6 +270,13 @@ function formatPercent(val, digits=1){
   return `${pct.toFixed(digits)}%`;
 }
 
+function isWithinWindow(dateValue, start, end){
+  if(!dateValue) return false;
+  const date = dayjs(dateValue);
+  if(!date.isValid()) return false;
+  return date.isBetween(start, end, 'day', '[]');
+}
+
 function normalizeExtendedQuoteSnapshot(quote, trades){
   if(!quote) return null;
   const extended = {
@@ -320,14 +335,20 @@ function summarizeInsiderActivity(trades=[], stats=[]){
   };
 }
 
-function summarizeAnalystActions(rows=[]){
+function summarizeAnalystActions(rows=[], referenceDate){
   if(!Array.isArray(rows) || !rows.length) return null;
-  const now = dayjs();
+  let reference = referenceDate ? dayjs(referenceDate) : dayjs();
+  if(!reference.isValid()) reference = dayjs();
   let upgrades7 = 0, downgrades7 = 0, upgrades30 = 0, downgrades30 = 0;
-  const normalized = rows.slice(0,6).map(row=>{
+  const sorted = [...rows].sort((a,b)=>{
+    const da = dayjs(a.publishedDate || a.date || a.lastUpdated || a.effectiveDate);
+    const db = dayjs(b.publishedDate || b.date || b.lastUpdated || b.effectiveDate);
+    return db.valueOf() - da.valueOf();
+  });
+  const recent = [];
+  for(const row of sorted){
     const date = dayjs(row.publishedDate || row.date || row.lastUpdated || row.effectiveDate);
-    const days = date.isValid() ? now.diff(date, 'day') : null;
-    const action = (row.action || row.grade || '').toLowerCase();
+    const days = date.isValid() ? Math.abs(reference.diff(date, 'day')) : null;
     if(days!=null){
       if(days <= 7){
         if(/upgrade|raise/i.test(row.action || row.toGrade || '')) upgrades7++;
@@ -338,19 +359,23 @@ function summarizeAnalystActions(rows=[]){
         if(/downgrade|lower/i.test(row.action || row.toGrade || '')) downgrades30++;
       }
     }
-    return {
-      date: date.isValid() ? date.format('YYYY-MM-DD') : (row.date || null),
-      firm: row.firm || row.company || row.analystCompany || '',
-      action: row.action || row.toGrade || '',
-      from: row.fromGrade || row.oldGrade || '',
-      to: row.toGrade || row.newGrade || '',
-      price_target: toFloat(row.priceTarget) ?? toFloat(row.newPriceTarget)
-    };
-  });
+    if(recent.length < 6){
+      recent.push({
+        date: date.isValid() ? date.format('YYYY-MM-DD') : (row.date || null),
+        firm: row.firm || row.company || row.analystCompany || '',
+        action: row.action || row.toGrade || '',
+        from: row.fromGrade || row.oldGrade || '',
+        to: row.toGrade || row.newGrade || '',
+        price_target: toFloat(row.priceTarget) ?? toFloat(row.newPriceTarget)
+      });
+    }
+    if(days!=null && days > 30) break;
+  }
+  if(!recent.length) return null;
   return {
     window_7d:{ upgrades: upgrades7, downgrades: downgrades7 },
     window_30d:{ upgrades: upgrades30, downgrades: downgrades30 },
-    recent: normalized
+    recent
   };
 }
 
@@ -435,17 +460,43 @@ async function fetchAftermarketSnapshot(ticker){
   }
 }
 
-async function fetchInsiderSnapshot(ticker){
-  if(!FMP_KEY) return null;
-  const cacheKey = `insider_${ticker}`;
+async function fetchInsiderSnapshot(ticker, baselineDate){
+  if(!FMP_KEY || !baselineDate) return null;
+  const baseline = dayjs(baselineDate);
+  if(!baseline.isValid()) return null;
+  const ageDays = dayjs().diff(baseline, 'day');
+  if(ageDays > INSIDER_MAX_AGE_DAYS) return null;
+  const windowStart = baseline.clone().subtract(INSIDER_LOOKBACK_DAYS, 'day');
+  const windowEnd = baseline.clone().add(INSIDER_LOOKAHEAD_DAYS, 'day');
+  const cacheKey = `insider_${ticker}_${windowStart.format('YYYYMMDD')}_${windowEnd.format('YYYYMMDD')}`;
   const cached = await readCache(cacheKey, INSIDER_CACHE_TTL_MS);
   if(cached) return cached.__empty ? null : cached;
   try{
     const [trades, stats] = await Promise.all([
-      getFmpInsiderTrading({ symbol: ticker, limit: 10 }, FMP_KEY),
-      getFmpInsiderStats({ symbol: ticker, period:'monthly', limit:2 }, FMP_KEY)
+      getFmpInsiderTrading({
+        symbol: ticker,
+        limit: 50,
+        from: windowStart.format('YYYY-MM-DD'),
+        to: windowEnd.format('YYYY-MM-DD')
+      }, FMP_KEY),
+      getFmpInsiderStats({ symbol: ticker, period:'monthly', limit: 6 }, FMP_KEY)
     ]);
-    const summary = summarizeInsiderActivity(trades, stats);
+    const filteredTrades = Array.isArray(trades)
+      ? trades.filter(row=>{
+          const dateStr = row.transactionDate || row.filingDate || row.date;
+          return dateStr && isWithinWindow(dateStr, windowStart, windowEnd);
+        })
+      : [];
+    const statsWindowStart = windowStart.clone().subtract(31, 'day');
+    const filteredStats = Array.isArray(stats)
+      ? stats.filter(row=>{
+          const period = row.period || row.date;
+          if(!period) return false;
+          const normalized = period.length === 7 ? `${period}-01` : period;
+          return isWithinWindow(normalized, statsWindowStart, windowEnd);
+        })
+      : [];
+    const summary = summarizeInsiderActivity(filteredTrades, filteredStats);
     await writeCache(cacheKey, summary || { __empty:true });
     return summary;
   }catch(err){
@@ -455,14 +506,26 @@ async function fetchInsiderSnapshot(ticker){
   }
 }
 
-async function fetchAnalystActionSnapshot(ticker){
-  if(!FMP_KEY) return null;
-  const cacheKey = `analyst_actions_${ticker}`;
+async function fetchAnalystActionSnapshot(ticker, baselineDate){
+  if(!FMP_KEY || !baselineDate) return null;
+  const baseline = dayjs(baselineDate);
+  if(!baseline.isValid()) return null;
+  const ageDays = dayjs().diff(baseline, 'day');
+  if(ageDays > ANALYST_ACTION_MAX_AGE_DAYS) return null;
+  const windowStart = baseline.clone().subtract(ANALYST_ACTION_LOOKBACK_DAYS, 'day');
+  const windowEnd = baseline.clone().add(ANALYST_ACTION_LOOKAHEAD_DAYS, 'day');
+  const cacheKey = `analyst_actions_${ticker}_${windowStart.format('YYYYMMDD')}_${windowEnd.format('YYYYMMDD')}`;
   const cached = await readCache(cacheKey, ANALYST_ACTION_CACHE_TTL_MS);
   if(cached) return cached.__empty ? null : cached;
   try{
-    const actions = await getFmpAnalystActions({ symbol: ticker, limit: 20 }, FMP_KEY);
-    const summary = summarizeAnalystActions(actions || []);
+    const actions = await getFmpAnalystActions({ symbol: ticker, limit: 60 }, FMP_KEY);
+    const filtered = Array.isArray(actions)
+      ? actions.filter(row=>{
+          const dateStr = row.publishedDate || row.date || row.lastUpdated || row.effectiveDate;
+          return dateStr && isWithinWindow(dateStr, windowStart, windowEnd);
+        })
+      : [];
+    const summary = summarizeAnalystActions(filtered || [], baselineDate);
     await writeCache(cacheKey, summary || { __empty:true });
     return summary;
   }catch(err){
@@ -1486,8 +1549,8 @@ async function performAnalysis(ticker, date, opts={}){
   const institutionalPromise = (async ()=>{
     let base = storedInstitutional || await fetchInstitutionalBase(upperTicker, baselineDate);
     const [insider, analystActions] = await Promise.all([
-      fetchInsiderSnapshot(upperTicker),
-      fetchAnalystActionSnapshot(upperTicker)
+      fetchInsiderSnapshot(upperTicker, baselineDate),
+      fetchAnalystActionSnapshot(upperTicker, baselineDate)
     ]);
     if(!base && !insider && !analystActions) return null;
     const enriched = { ...(base || {}) };
@@ -1550,10 +1613,13 @@ async function performAnalysis(ticker, date, opts={}){
 
   const analystSignalsPromise = (async ()=>{
     if(!FMP_KEY) return null;
+    const baseAgeDays = Math.abs(dayjs().diff(baselineDate, 'day'));
+    if(baseAgeDays > ANALYST_DATA_MAX_AGE_DAYS) return null;
     const aggregateKey = `analyst_signals_${upperTicker}`;
     const aggregateCached = await readCache(aggregateKey, ANALYST_AGGREGATE_TTL_MS);
     if(aggregateCached) return aggregateCached;
 
+    const includeExtended = baseAgeDays <= ANALYST_EXTENDED_WINDOW_DAYS;
     const fetchWithTtl = async ({ label, ttl, fetcher })=>{
       const key = `analyst_${label}_${upperTicker}`;
       const memo = await readCache(key, ttl);
@@ -1568,57 +1634,33 @@ async function performAnalysis(ticker, date, opts={}){
       }
     };
 
-    const [summary, estimatesAnnual, estimatesQuarterly, ratingSnapshot, ratingHistorical, gradesLatest, gradesHistorical, gradesConsensus] = await Promise.all([
-      fetchWithTtl({
-        label:'pts',
-        ttl: ANALYST_PRICE_TARGET_TTL_MS,
-        fetcher: ()=>getFmpPriceTargetSummary(upperTicker, FMP_KEY)
-      }),
-      fetchWithTtl({
-        label:'est_ann',
-        ttl: ANALYST_ESTIMATES_TTL_MS,
-        fetcher: ()=>getFmpAnalystEstimates({ symbol: upperTicker, period:'annual', limit:12 }, FMP_KEY)
-      }),
-      fetchWithTtl({
-        label:'est_q',
-        ttl: ANALYST_ESTIMATES_TTL_MS,
-        fetcher: ()=>getFmpAnalystEstimates({ symbol: upperTicker, period:'quarter', limit:12 }, FMP_KEY)
-      }),
-      fetchWithTtl({
-        label:'rating_snap',
-        ttl: ANALYST_RATING_SNAPSHOT_TTL_MS,
-        fetcher: ()=>getFmpRatingsSnapshot(upperTicker, FMP_KEY)
-      }),
-      fetchWithTtl({
-        label:'rating_hist',
-        ttl: ANALYST_RATING_HISTORY_TTL_MS,
-        fetcher: ()=>getFmpRatingsHistorical({ symbol: upperTicker, limit:6 }, FMP_KEY)
-      }),
-      fetchWithTtl({
-        label:'grades_latest',
-        ttl: ANALYST_GRADES_TTL_MS,
-        fetcher: ()=>getFmpGrades(upperTicker, FMP_KEY)
-      }),
-      fetchWithTtl({
-        label:'grades_hist',
-        ttl: ANALYST_GRADES_HISTORY_TTL_MS,
-        fetcher: ()=>getFmpGradesHistorical({ symbol: upperTicker, limit:1 }, FMP_KEY)
-      }),
-      fetchWithTtl({
-        label:'grades_cons',
-        ttl: ANALYST_GRADES_CONSENSUS_TTL_MS,
-        fetcher: ()=>getFmpGradesConsensus(upperTicker, FMP_KEY)
-      })
-    ]);
+    const tasks = [
+      { label:'summary', ttl: ANALYST_PRICE_TARGET_TTL_MS, fetcher: ()=>getFmpPriceTargetSummary(upperTicker, FMP_KEY) },
+      { label:'rating_snap', ttl: ANALYST_RATING_SNAPSHOT_TTL_MS, fetcher: ()=>getFmpRatingsSnapshot(upperTicker, FMP_KEY) },
+      { label:'rating_hist', ttl: ANALYST_RATING_HISTORY_TTL_MS, fetcher: ()=>getFmpRatingsHistorical({ symbol: upperTicker, limit:6 }, FMP_KEY) }
+    ];
+    if(includeExtended){
+      tasks.push(
+        { label:'est_ann', ttl: ANALYST_ESTIMATES_TTL_MS, fetcher: ()=>getFmpAnalystEstimates({ symbol: upperTicker, period:'annual', limit:12 }, FMP_KEY) },
+        { label:'est_q', ttl: ANALYST_ESTIMATES_TTL_MS, fetcher: ()=>getFmpAnalystEstimates({ symbol: upperTicker, period:'quarter', limit:12 }, FMP_KEY) },
+        { label:'grades_latest', ttl: ANALYST_GRADES_TTL_MS, fetcher: ()=>getFmpGrades(upperTicker, FMP_KEY) },
+        { label:'grades_hist', ttl: ANALYST_GRADES_HISTORY_TTL_MS, fetcher: ()=>getFmpGradesHistorical({ symbol: upperTicker, limit:1 }, FMP_KEY) },
+        { label:'grades_cons', ttl: ANALYST_GRADES_CONSENSUS_TTL_MS, fetcher: ()=>getFmpGradesConsensus(upperTicker, FMP_KEY) }
+      );
+    }
+
+    const results = await Promise.all(tasks.map(task=>fetchWithTtl(task)));
+    const map = {};
+    tasks.forEach((task, idx)=>{ map[task.label] = results[idx]; });
 
     const normalized = summarizeAnalystSignals({
-      summary,
-      estimates: { annual: estimatesAnnual, quarterly: estimatesQuarterly },
-      ratingsSnapshot: ratingSnapshot,
-      ratingsHistorical: ratingHistorical,
-      grades: gradesLatest,
-      gradesHistorical,
-      gradesConsensus
+      summary: map.summary,
+      estimates: includeExtended ? { annual: map.est_ann, quarterly: map.est_q } : {},
+      ratingsSnapshot: map.rating_snap,
+      ratingsHistorical: map.rating_hist,
+      grades: includeExtended ? map.grades_latest : null,
+      gradesHistorical: includeExtended ? map.grades_hist : null,
+      gradesConsensus: includeExtended ? map.grades_cons : null
     });
     if(normalized){
       await writeCache(aggregateKey, normalized);
