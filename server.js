@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import morgan from 'morgan';
 import dayjs from 'dayjs';
+import isBetweenPlugin from 'dayjs/plugin/isBetween.js';
 import fetch from 'node-fetch';
 import multer from 'multer';
 import path from 'path';
@@ -41,6 +42,8 @@ import { summarizeMda } from './lib/mdaSummarizer.js';
 import { summarizeCallTranscript } from './lib/callSummarizer.js';
 import { enqueueJob } from './lib/jobQueue.js';
 import { getAdaptiveLimits, recordUsage } from './lib/usageMonitor.js';
+
+dayjs.extend(isBetweenPlugin);
 
 const app = express();
 app.use(express.json());
