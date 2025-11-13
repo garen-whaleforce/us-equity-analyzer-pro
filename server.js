@@ -1293,31 +1293,49 @@ function adjustRatingForSignals(analysis, { priceMeta, guardrails, momentum }={}
   const current = toFloat(priceMeta?.value);
   if(current==null) return;
   const target = toFloat(analysis.action.target_price);
-  const stance = classifyRecommendation(analysis.action.rating);
+  let stance = classifyRecommendation(analysis.action.rating);
   const score = toFloat(momentum?.score);
   const severe = guardrails?.severe_momentum || guardrails?.selling_pressure;
-  const degrade = (newRating, reason)=>{
+  const updateRating = (newRating, reason)=>{
     if(!newRating || analysis.action.rating === newRating) return;
     analysis.action.rating = newRating;
     analysis.action.rationale = appendRationale(analysis.action.rationale, `（${reason}）`);
     analysis.action.consistency_flag = 'needs_review';
+    stance = classifyRecommendation(newRating);
   };
   if(target!=null && target <= current * 0.95){
-    degrade('SELL', '目標價低於現價，建議減碼');
-    return;
+    updateRating('SELL', '目標價低於現價，建議減碼');
   }
   if(score!=null){
     if(score <= 25){
-      degrade('SELL', `動能極弱（${score}分），建議出場`);
+      updateRating('SELL', `動能極弱（${score}分），建議出場`);
     }else if(score <= 40 && stance === 'bullish'){
-      degrade('HOLD', `動能不足（${score}分），改為觀望`);
+      updateRating('HOLD', `動能不足（${score}分），改為觀望`);
+    }else if(score >= 60 && stance === 'neutral' && target!=null && target >= current * 1.08){
+      updateRating('BUY', `動能偏強（${score}分）且目標價具 8% 以上上行空間`);
     }
   }
   if(severe && stance === 'bullish'){
-    degrade('HOLD', '動能或籌碼偏弱，自動調降評級');
+    updateRating('HOLD', '動能或籌碼偏弱，自動調降評級');
   }
   if(current < 10 && stance === 'bullish'){
-    degrade('HOLD', '低價股易受波動影響，改採保守建議');
+    updateRating('HOLD', '低價股易受波動影響，改採保守建議');
+  }
+  if(stance === 'neutral' && target!=null){
+    if(target >= current * 1.08 && !severe){
+      updateRating('BUY', '上行空間超過 8%，應給出買進建議');
+    }else if(target <= current * 0.92){
+      updateRating('SELL', '下行空間超過 8%，建議賣出');
+    }
+  }
+  if(stance === 'bullish' && target!=null && target <= current * 1.03){
+    updateRating('HOLD', '上行空間不足 3%，維持中性觀望');
+  }
+  if(stance === 'bearish' && target!=null && target >= current * 0.97){
+    updateRating('HOLD', '下行空間有限，調整為中性');
+  }
+  if(stance === 'bearish' && score!=null && score >= 65 && target!=null && target > current){
+    updateRating('HOLD', '動能轉強且目標價高於現價，撤回賣出建議');
   }
 }
 
