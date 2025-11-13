@@ -1124,6 +1124,65 @@ function appendRationale(text, note){
   return text ? `${text} ${note}` : note;
 }
 
+function classifyRecommendation(rating=''){
+  if(!rating) return null;
+  const normalized = rating.toString().toLowerCase();
+  if(/(buy|long|outperform|overweight|accumulate|positive|增持|買)/.test(normalized)) return 'bullish';
+  if(/(sell|short|underperform|reduce|減持|賣)/.test(normalized)) return 'bearish';
+  if(/(hold|neutral|market perform|equal weight|觀望|持有)/.test(normalized)) return 'neutral';
+  return null;
+}
+
+function ensureActionRationale(analysis, { priceMeta, signalHints }={}){
+  if(!analysis?.action) return;
+  const rawText = typeof analysis.action.rationale === 'string'
+    ? analysis.action.rationale.trim()
+    : '';
+  if(rawText){
+    analysis.action.rationale = rawText;
+    return;
+  }
+  const parts = [];
+  const rating = analysis.action.rating ? String(analysis.action.rating).trim() : '';
+  if(rating) parts.push(`維持 ${rating} 建議`);
+  const current = toFloat(priceMeta?.value);
+  const target = toFloat(analysis.action.target_price);
+  if(current!=null && target!=null && current!==0){
+    const diffPct = ((target - current) / current) * 100;
+    parts.push(`目標價 ${target.toFixed(2)} 相對現價 ${current.toFixed(2)}，差異 ${diffPct.toFixed(1)}%`);
+  }else if(target!=null){
+    parts.push(`目標價 ${target}`);
+  }
+  if(Array.isArray(signalHints) && signalHints.length){
+    parts.push(signalHints[0]);
+  }
+  analysis.action.rationale = parts.length
+    ? parts.join('；')
+    : '模型未提供額外理由，請搭配財報與指標自行判斷。';
+}
+
+function enforceActionConsistency(analysis, priceMeta){
+  if(!analysis?.action) return;
+  const stance = classifyRecommendation(analysis.action.rating);
+  const current = toFloat(priceMeta?.value);
+  const target = toFloat(analysis.action.target_price);
+  if(!stance || current==null || current===0 || target==null) return;
+  const deltaPct = (target - current) / current;
+  let note = null;
+  const pctText = `${(deltaPct * 100).toFixed(1)}%`;
+  if(stance === 'neutral' && Math.abs(deltaPct) >= 0.15){
+    note = `（檢查：評級為 ${analysis.action.rating}，但目標價與現價差距 ${pctText}，請重新檢視假設。）`;
+  }else if(stance === 'bullish' && deltaPct < 0.05){
+    note = `（檢查：評級為 ${analysis.action.rating}，但目標價僅較現價 ${pctText}，建議補充上行理由。）`;
+  }else if(stance === 'bearish' && deltaPct > -0.05){
+    note = `（檢查：評級為 ${analysis.action.rating}，但目標價與現價差距僅 ${pctText}，請說明下行風險。）`;
+  }
+  if(note){
+    analysis.action.rationale = appendRationale(analysis.action.rationale, note);
+    analysis.action.consistency_flag = 'needs_review';
+  }
+}
+
 function applyTargetPriceGuardrails(analysis, priceMeta, guardrails={}){
   if(!analysis?.action || !priceMeta) return;
   const current = toFloat(priceMeta.value);
@@ -1906,6 +1965,10 @@ async function performAnalysis(ticker, date, opts={}){
     llmUsage = llm?.__usage || null;
     if(llmUsage) recordUsage(llmUsage);
     applyTargetPriceGuardrails(llm, priceMeta, guardrails);
+  }
+  if(llm){
+    ensureActionRationale(llm, { priceMeta, signalHints });
+    enforceActionConsistency(llm, priceMeta);
   }
 
   const result = {
