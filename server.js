@@ -1175,6 +1175,24 @@ function resolveSectorRiskProfile(sector){
   return base;
 }
 
+function mapSectorLabel(sector){
+  const sec = String(sector || '').toLowerCase();
+  const map = {
+    'technology':'科技股',
+    'communication services':'通訊服務股',
+    'consumer cyclical':'非必需消費股',
+    'consumer defensive':'必需消費股',
+    'energy':'能源股',
+    'financial services':'金融股',
+    'healthcare':'醫療保健股',
+    'industrials':'工業股',
+    'real estate':'不動產股',
+    'basic materials':'原物料股',
+    'utilities':'公用事業股'
+  };
+  return map[sec] || sector || null;
+}
+
 function appendRationale(text, note){
   if(!note) return text || '';
   return text ? `${text} ${note}` : note;
@@ -2332,6 +2350,10 @@ async function performAnalysis(ticker, date, opts={}){
     ensureHoldTriggers(llm);
     ensureActionRationale(llm, { priceMeta, signalHints });
     enforceActionConsistency(llm, priceMeta);
+    if(sectorProfile?.sector){
+      llm.profile = llm.profile || {};
+      llm.profile.sector_label = mapSectorLabel(sectorProfile.sector);
+    }
   }
 
   const result = {
