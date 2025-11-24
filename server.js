@@ -910,9 +910,7 @@ function buildPriceTargetStats(summary){
   const quarter = normalizeBucket(summary.last_quarter?.count, summary.last_quarter?.avg);
   const year = normalizeBucket(summary.last_year?.count, summary.last_year?.avg);
   const hasEnough = bucket=> bucket.count >= PRICE_TARGET_SAMPLE_THRESHOLD && bucket.avg!=null;
-  const hasAny = bucket=> bucket.count > 0 && bucket.avg!=null;
   const buckets = [month, quarter, year];
-  const recentSource = buckets.find(hasAny) || null;
   const confidenceSource = buckets.find(hasEnough) || null;
   return {
     month_avg: month.avg,
@@ -921,7 +919,7 @@ function buildPriceTargetStats(summary){
     quarter_count: summary.last_quarter?.count ?? null,
     year_avg: year.avg,
     year_count: summary.last_year?.count ?? null,
-    recent_avg: recentSource ? recentSource.avg : null,
+    recent_avg: confidenceSource ? confidenceSource.avg : null,
     confidence: confidenceSource ? 'high' : 'low'
   };
 }
@@ -2313,6 +2311,9 @@ async function performAnalysis(ticker, date, opts={}){
   const signalHints = buildSignalHints({ momentum, institutional, valuation: valuationSummary });
   const guardrails = deriveGuardrails({ momentum, institutional });
   const consensusAvg = getConsensusTargetAvg(analystSignals);
+  if(analystMetrics?.price_targets?.confidence === 'low'){
+    if(analystMetrics.price_targets) analystMetrics.price_targets.recent_avg = null;
+  }
   const llmNews = trimNewsForPayload(newsCompact, effectiveNewsLimit);
   const llmPayload = buildNumericPayload({
     ticker: upperTicker,
@@ -2330,6 +2331,9 @@ async function performAnalysis(ticker, date, opts={}){
     guardrails,
     sectorProfile
   });
+  if(llmPayload.analyst_metrics?.price_targets?.confidence === 'low'){
+    llmPayload.analyst_metrics.price_targets = null;
+  }
   let llm = null;
   let llmUsage = null;
   if(skipLlm){

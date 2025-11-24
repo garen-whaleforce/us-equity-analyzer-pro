@@ -399,16 +399,15 @@ function ensurePriceTargetConfidence(targets){
     normalize(targets.quarter_count, targets.quarter_avg),
     normalize(targets.year_count, targets.year_avg)
   ];
-  const firstWithSamples = buckets.find(b=>b.count > 0 && b.avg!=null);
   const firstConfident = buckets.find(b=>b.count >= PRICE_TARGET_SAMPLE_THRESHOLD && b.avg!=null);
   const normalized = { ...targets };
   normalized.month_avg = buckets[0].avg;
   normalized.quarter_avg = buckets[1].avg;
   normalized.year_avg = buckets[2].avg;
-  if(normalized.recent_avg==null && firstWithSamples){
-    normalized.recent_avg = firstWithSamples.avg;
+  normalized.confidence = firstConfident ? "high" : "low";
+  if(normalized.confidence !== "high"){
+    normalized.recent_avg = null;
   }
-  normalized.confidence = firstConfident ? 'high' : 'low';
   return normalized;
 }
 
@@ -429,7 +428,6 @@ function normalizeAnalystMetrics(source){
   const quarter = normalizeBucket(summary.last_quarter);
   const year = normalizeBucket(summary.last_year);
   const buckets = [month, quarter, year];
-  const recentSource = buckets.find(b=>b.count > 0 && b.avg!=null) || null;
   const confidenceSource = buckets.find(b=>b.count >= PRICE_TARGET_SAMPLE_THRESHOLD && b.avg!=null) || null;
   const priceTargets = (summary.last_month || summary.last_quarter || summary.last_year) ? {
     month_avg: month.avg,
@@ -438,7 +436,7 @@ function normalizeAnalystMetrics(source){
     quarter_count: summary.last_quarter?.count ?? null,
     year_avg: year.avg,
     year_count: summary.last_year?.count ?? null,
-    recent_avg: recentSource ? recentSource.avg : null,
+    recent_avg: confidenceSource ? confidenceSource.avg : null,
     confidence: confidenceSource ? 'high' : 'low'
   } : null;
   const estQuarter = Array.isArray(source.estimates?.quarterly) ? source.estimates.quarterly[0] : null;
@@ -864,19 +862,21 @@ function renderAnalystSignals(rawData){
     appendLine(analystSummaryEl, '尚無分析師資料', 'muted');
     return;
   }
-  const summaryParts = [];
-  if(data.price_targets?.month_avg!=null){
-    summaryParts.push(`近月 ${formatUsd(data.price_targets.month_avg)} (${data.price_targets.month_count ?? 0}筆)`);
-  }
-  if(data.price_targets?.quarter_avg!=null){
-    summaryParts.push(`近季 ${formatUsd(data.price_targets.quarter_avg)} (${data.price_targets.quarter_count ?? 0}筆)`);
-  }
-  if(data.price_targets?.year_avg!=null){
-    summaryParts.push(`近年 ${formatUsd(data.price_targets.year_avg)} (${data.price_targets.year_count ?? 0}筆)`);
-  }
-  appendLine(analystSummaryEl, summaryParts.length ? summaryParts.join(' ｜ ') : '目標價資料有限，僅供參考。', summaryParts.length ? '' : 'muted');
-  if(data.price_targets?.confidence === 'low'){
-    appendLine(analystSummaryEl, '分析師樣本少於 3 筆，僅供參考。', 'muted');
+  const pt = data.price_targets;
+  if(pt && pt.confidence === 'high'){
+    const summaryParts = [];
+    if(pt.month_avg!=null){
+      summaryParts.push(`近月 ${formatUsd(pt.month_avg)} (${pt.month_count ?? 0}筆)`);
+    }
+    if(pt.quarter_avg!=null){
+      summaryParts.push(`近季 ${formatUsd(pt.quarter_avg)} (${pt.quarter_count ?? 0}筆)`);
+    }
+    if(pt.year_avg!=null){
+      summaryParts.push(`近年 ${formatUsd(pt.year_avg)} (${pt.year_count ?? 0}筆)`);
+    }
+    appendLine(analystSummaryEl, summaryParts.length ? summaryParts.join(' ｜ ') : '目標價資料有限，僅供參考。', summaryParts.length ? '' : 'muted');
+  }else{
+    appendLine(analystSummaryEl, '分析師目標價資料不足（樣本 < 3 筆）', 'muted');
   }
 
   const detailLines = [];
