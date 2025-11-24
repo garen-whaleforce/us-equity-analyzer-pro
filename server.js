@@ -902,29 +902,27 @@ function buildEstimateStats(estimates){
 
 function buildPriceTargetStats(summary){
   if(!summary) return null;
-  const monthAvg = toFloat(summary.last_month?.avg);
-  const quarterAvg = toFloat(summary.last_quarter?.avg);
-  const yearAvg = toFloat(summary.last_year?.avg);
-  const monthCount = Number(summary.last_month?.count) || 0;
-  const quarterCount = Number(summary.last_quarter?.count) || 0;
-  const yearCount = Number(summary.last_year?.count) || 0;
-  const hasSamples = count=> count >= PRICE_TARGET_SAMPLE_THRESHOLD;
-  const recentSource = hasSamples(monthCount) && monthAvg!=null
-    ? { value: monthAvg }
-    : hasSamples(quarterCount) && quarterAvg!=null
-      ? { value: quarterAvg }
-      : hasSamples(yearCount) && yearAvg!=null
-        ? { value: yearAvg }
-        : null;
+  const normalizeBucket = (countRaw, avgRaw)=>({
+    count: Number(countRaw) || 0,
+    avg: Number(countRaw) > 0 ? toFloat(avgRaw) : null
+  });
+  const month = normalizeBucket(summary.last_month?.count, summary.last_month?.avg);
+  const quarter = normalizeBucket(summary.last_quarter?.count, summary.last_quarter?.avg);
+  const year = normalizeBucket(summary.last_year?.count, summary.last_year?.avg);
+  const hasEnough = bucket=> bucket.count >= PRICE_TARGET_SAMPLE_THRESHOLD && bucket.avg!=null;
+  const hasAny = bucket=> bucket.count > 0 && bucket.avg!=null;
+  const buckets = [month, quarter, year];
+  const recentSource = buckets.find(hasAny) || null;
+  const confidenceSource = buckets.find(hasEnough) || null;
   return {
-    month_avg: monthAvg,
+    month_avg: month.avg,
     month_count: summary.last_month?.count ?? null,
-    quarter_avg: quarterAvg,
+    quarter_avg: quarter.avg,
     quarter_count: summary.last_quarter?.count ?? null,
-    year_avg: yearAvg,
+    year_avg: year.avg,
     year_count: summary.last_year?.count ?? null,
-    recent_avg: recentSource ? recentSource.value : null,
-    confidence: recentSource ? 'high' : 'low'
+    recent_avg: recentSource ? recentSource.avg : null,
+    confidence: confidenceSource ? 'high' : 'low'
   };
 }
 
