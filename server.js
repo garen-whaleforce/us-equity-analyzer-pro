@@ -1365,13 +1365,21 @@ function ensureHoldTriggers(analysis){
 function getConsensusTargetAvg(analystSignals){
   if(!analystSignals?.price_target_summary) return null;
   const summary = analystSignals.price_target_summary;
-  return toFloat(
-    summary.last_month?.avg ??
-    summary.last_quarter?.avg ??
-    summary.last_year?.avg ??
-    summary.all_time?.avg ??
-    null
-  );
+  const normalize = bucket=>{
+    if(!bucket) return null;
+    const count = Number(bucket.count) || 0;
+    const avg = toFloat(bucket.avg);
+    if(count < PRICE_TARGET_SAMPLE_THRESHOLD) return null;
+    if(avg==null || avg <= 0) return null;
+    return avg;
+  };
+  const candidates = [
+    normalize(summary.last_month),
+    normalize(summary.last_quarter),
+    normalize(summary.last_year),
+    normalize(summary.all_time)
+  ];
+  return candidates.find(v=>v!=null) ?? null;
 }
 
 function ensureActionRationale(analysis, { priceMeta, signalHints }={}){
