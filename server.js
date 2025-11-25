@@ -723,7 +723,8 @@ function summarizeInstitutionalRows(payload){
           if(!name) return null;
           const value = Number(row.value ?? row.marketValue ?? row.marketvalue ?? row.latestValue);
           const weightRaw = Number(row.weightPercentage ?? row.weightPercent ?? row.weight ?? row.portfolioPercent);
-          const weight = Number.isFinite(weightRaw) ? (weightRaw > 1 ? weightRaw/100 : weightRaw) : null;
+          // FMP 的欄位名稱已經表明百分比，統一視為百分比數字（0-100），轉成 0-1 比例
+          const weight = Number.isFinite(weightRaw) ? (weightRaw / 100) : null;
           const changeShares = Number(row.change ?? row.changeInShares ?? row.changeShares ?? row.change_shares);
           const reportDate = row.dateReported || row.latestQuarter || row.period || row.date;
           const changePercent = Number(row.changePercent ?? row.changePercentage);
