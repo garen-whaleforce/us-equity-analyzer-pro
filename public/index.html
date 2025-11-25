@@ -772,13 +772,14 @@ function renderInstitutional(data){
   appendLine(instSummaryEl, data.summary || '最近未見顯著變動。', 'muted');
   const top = Array.isArray(data.top_holders) ? data.top_holders : [];
   if(top.length){
-    appendLine(instDetailEl, '前五大機構', '');
+    appendLine(instDetailEl, '前五大機構（實際持股率｜組合權重）', '');
     top.forEach(holder=>{
-      const pctText = holder.actual_pct!=null ? formatPct(holder.actual_pct) : (holder.weight!=null ? formatPct(holder.weight) : '');
+      const actualText = holder.actual_pct!=null ? formatPct(holder.actual_pct) : '－';
+      const weightText = holder.weight!=null ? formatPct(holder.weight) : '－';
       const changeText = holder.change_shares ? `，變動 ${formatMillions(holder.change_shares)} 股` : '';
       appendLine(
         instDetailEl,
-        `• ${holder.name || '機構'}：${formatMillions(holder.value)} ${pctText?`（${pctText}）`:''}${changeText}`,
+        `• ${holder.name || '機構'}：${formatMillions(holder.value)}（實際持股率 ${actualText}｜組合權重 ${weightText}）${changeText}`,
         'muted'
       );
     });
