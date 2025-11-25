@@ -1202,7 +1202,8 @@ function appendRationale(text, note){
 function blendTargetWithConsensus(analysis, consensusAvg, baselinePrice){
   if(!analysis?.action) return;
   const llmTarget = toFloat(analysis.action.target_price);
-  const consensus = toFloat(consensusAvg);
+  const consensusRaw = toFloat(consensusAvg);
+  const consensus = (consensusRaw && consensusRaw > 0) ? consensusRaw : null;
   const baseline = toFloat(baselinePrice);
   const components = [];
   if(llmTarget!=null) components.push({ value: llmTarget, weight: 0.5 });
