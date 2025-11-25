@@ -76,6 +76,7 @@ curl -s -X POST http://localhost:5000/api/analyze \
 
 - 前端頁面底部的「批次分析」工作列可直接上傳 Excel/CSV；第一欄 `ticker`、第二欄 `date`（`YYYY-MM-DD`），舊版第三欄 `model` 仍相容但可留空。
 - 也可在批次區直接輸入多檔 ticker（以分號 `;` 或換行分隔），系統會套用頁面上方的日期與所選批次模式。
+- 新增「批次來源」下拉，直接載入市值前 N（預設 10，S&P 500）清單，再套用日期/模式後一鍵跑批次。
 - 上傳前可透過「批次模式」下拉選擇 `完整分析`（含 LLM）、`僅快取` 或 `只整合資料（無 LLM）`，方便在大量匯入時節流。
 - 伺服器會依序執行與 `/api/analyze` 相同的流程，並輸出 CSV，欄位為：Ticker、Date、Model、現價、ChatGPT 總結目標價、建議、類型（大型/小型股）、體質分數、新聞情緒、動能評分、趨勢燈號。
 - 後端同時提供 `POST /api/batch`，multipart field 名稱為 `file`，可自動取得產出的 CSV。

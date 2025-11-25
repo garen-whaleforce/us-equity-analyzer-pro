@@ -135,6 +135,18 @@ function cacheRealtimeQuote(symbol, payload){
   realtimeQuoteCache.set(symbol.toUpperCase(), { ...payload, ts: Date.now() });
 }
 
+async function fetchSp500Symbols(){
+  const url = `https://financialmodelingprep.com/stable/sp500-constituent?apikey=${FMP_KEY}`;
+  const res = await fetch(url);
+  if(!res.ok){
+    throw new Error(`[FMP] sp500 list failed: ${res.status}`);
+  }
+  const data = await res.json();
+  if(!Array.isArray(data)) throw new Error('[FMP] sp500 list empty');
+  const symbols = data.map(row=>row.symbol).filter(Boolean);
+  return Array.from(new Set(symbols.map(sym=>String(sym).trim().toUpperCase()).filter(Boolean)));
+}
+
 function getCachedRealtimeQuote(symbol){
   if(!symbol) return null;
   const entry = realtimeQuoteCache.get(symbol.toUpperCase());
@@ -173,6 +185,23 @@ async function prefetchBatchQuotes(symbols){
   }catch(err){
     console.warn('[FMP batch quote]', err.message);
   }
+}
+
+async function getTopMarketCapSymbols(limit=10){
+  if(!FMP_KEY) throw new Error('missing_fmp_key');
+  const safeLimit = Math.max(1, Math.min(500, Number(limit) || 10));
+  const sp500 = await fetchSp500Symbols();
+  const quotes = await getFmpBatchQuote(sp500, FMP_KEY);
+  const rows = Array.isArray(quotes) ? quotes : [];
+  const sorted = rows
+    .map(row=>{
+      const symbol = row.symbol?.toUpperCase?.();
+      const marketCap = Number(row.marketCap ?? row.marketcap ?? row.market_cap ?? row.marketCapitalization);
+      return { symbol, marketCap };
+    })
+    .filter(r=>r.symbol && Number.isFinite(r.marketCap))
+    .sort((a,b)=> (b.marketCap || 0) - (a.marketCap || 0));
+  return sorted.slice(0, safeLimit).map(r=>r.symbol);
 }
 
 function resolveModelName(requested, opts={}){
@@ -2481,6 +2510,20 @@ app.post('/api/reset-cache', async (req,res)=>{
   const clearedExact = clearCacheForTicker({ ticker: upperTicker, baselineDate: normalizedDate });
   const clearedAll = clearCacheForTicker({ ticker: upperTicker, includeAllDates: true });
   res.json({ ok:true, cleared_cache_files: clearedExact + clearedAll });
+});
+
+app.get('/api/batch/preset', async (req,res)=>{
+  try{
+    const type = String(req.query.type || '').toLowerCase() || 'marketcap';
+    const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 10));
+    if(type === 'marketcap' || type === 'marketcap-top'){
+      const tickers = await getTopMarketCapSymbols(limit);
+      return res.json({ tickers, source:type, limit });
+    }
+    return res.status(400).json({ error:'unsupported preset type' });
+  }catch(err){
+    return errRes(res, err);
+  }
 });
 
 app.post('/api/batch', upload.single('file'), async (req,res)=>{

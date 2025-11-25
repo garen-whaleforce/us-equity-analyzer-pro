@@ -189,6 +189,20 @@ canvas{background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:10
     <div class="summary muted" style="margin-top:12px">
       <strong>手動輸入：</strong>可直接輸入多檔 ticker（以分號「;」或換行分隔），日期沿用上方 Date 欄位（預設今日），模式依下拉選單。
     </div>
+    <div class="batch-card-action" style="margin-top:8px;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+      <div style="min-width:200px">
+        <label class="muted" style="font-size:13px;display:block;margin-bottom:4px">批次來源</label>
+        <select id="batchSource">
+          <option value="manual">自訂（手動/上傳）</option>
+          <option value="marketcap-top">市值前 N（S&P 500）</option>
+        </select>
+      </div>
+      <div style="width:120px">
+        <label class="muted" style="font-size:13px;display:block;margin-bottom:4px">N（預設 10）</label>
+        <input id="batchPresetLimit" type="number" value="10" min="1" max="500" />
+      </div>
+      <button id="loadPresetBtn" style="width:auto;min-width:120px">載入清單</button>
+    </div>
     <div class="batch-card-action" style="margin-top:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
       <input id="batchTickers" placeholder="AAPL;MSFT;NVDA" style="flex:1;min-width:240px"/>
       <button id="batchManualBtn" style="width:auto;min-width:140px">用清單開始</button>
@@ -1034,6 +1048,11 @@ const batchModeSelect = document.getElementById('batchMode');
 const batchTickersInput = document.getElementById('batchTickers');
 const batchManualBtn = document.getElementById('batchManualBtn');
 const batchManualLabel = batchManualBtn?.textContent || '用清單開始';
+const batchSourceSelect = document.getElementById('batchSource');
+const batchPresetLimitInput = document.getElementById('batchPresetLimit');
+const loadPresetBtn = document.getElementById('loadPresetBtn');
+const loadPresetLabel = loadPresetBtn?.textContent || '載入清單';
+let batchIsRunning = false;
 const dateInputEl = document.getElementById('d');
 if(dateInputEl){
   const todayStr = dayjs().format('YYYY-MM-DD');
@@ -1242,7 +1261,19 @@ const batchFile = document.getElementById('batchFile');
 const batchCardBtn = document.getElementById('batchCardBtn');
 const batchRunning = document.getElementById('batchRunning');
 
+function updatePresetControls(){
+  const isManual = (batchSourceSelect?.value || 'manual') === 'manual';
+  if(loadPresetBtn){
+    loadPresetBtn.disabled = batchIsRunning || isManual;
+    loadPresetBtn.textContent = batchIsRunning ? '載入中...' : loadPresetLabel;
+  }
+  if(batchPresetLimitInput){
+    batchPresetLimitInput.disabled = batchIsRunning || isManual;
+  }
+}
+
 function setBatchState(running){
+  batchIsRunning = running;
   if(batchCardBtn) batchCardBtn.style.display = running ? 'none' : 'inline-flex';
   if(batchManualBtn){
     batchManualBtn.disabled = running;
@@ -1250,6 +1281,8 @@ function setBatchState(running){
   }
   if(batchTickersInput) batchTickersInput.disabled = running;
   if(batchRunning) batchRunning.style.display = running ? 'flex' : 'none';
+  if(batchSourceSelect) batchSourceSelect.disabled = running;
+  updatePresetControls();
 }
 setBatchState(false);
 
@@ -1304,6 +1337,37 @@ function buildManualBatchFile(){
   return blob;
 }
 
+async function loadPresetTickers(){
+  const source = batchSourceSelect?.value || 'manual';
+  if(source === 'manual'){
+    alert('請先選擇批次來源（例如市值前 N）');
+    return;
+  }
+  const limit = Math.max(1, Math.min(500, Number(batchPresetLimitInput?.value) || 10));
+  try{
+    batchIsRunning = true;
+    updatePresetControls();
+    const qs = new URLSearchParams({ type: source, limit: String(limit) });
+    const res = await fetch(`/api/batch/preset?${qs.toString()}`);
+    if(!res.ok){
+      const text = await res.text();
+      throw new Error(text || '載入失敗');
+    }
+    const data = await res.json();
+    const tickers = Array.isArray(data.tickers) ? data.tickers : [];
+    if(!tickers.length) throw new Error('未取得清單');
+    if(batchTickersInput){
+      batchTickersInput.value = tickers.join(';');
+    }
+    setStatus(`已載入 ${tickers.length} 檔（${source}）`, 'done');
+  }catch(err){
+    alert(`載入失敗：${err.message}`);
+  }finally{
+    batchIsRunning = false;
+    updatePresetControls();
+  }
+}
+
 if(batchCardBtn) batchCardBtn.addEventListener('click', ()=> batchFile.click());
 batchFile.addEventListener('change', ()=>{
   const file = batchFile.files[0];
@@ -1315,6 +1379,12 @@ if(batchManualBtn){
     const manualFile = buildManualBatchFile();
     if(manualFile) handleBatchUpload(manualFile);
   });
+}
+if(batchSourceSelect){
+  batchSourceSelect.addEventListener('change', updatePresetControls);
+}
+if(loadPresetBtn){
+  loadPresetBtn.addEventListener('click', loadPresetTickers);
 }
 const pdfBtn = document.getElementById('downloadPdf');
 if(pdfBtn){ pdfBtn.addEventListener('click', ()=> window.print()); }
