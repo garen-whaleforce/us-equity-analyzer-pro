@@ -277,10 +277,11 @@ function formatMillions(val){
   return num.toFixed(0);
 }
 
-function formatPercent(val, digits=1){
+function formatPercent(val, digits=1, opts={}){
   const num = Number(val);
   if(!Number.isFinite(num)) return '';
-  const pct = num > 1 ? num : num * 100;
+  const alreadyPercent = Boolean(opts.alreadyPercent);
+  const pct = (!alreadyPercent && Math.abs(num) <= 1) ? num * 100 : num;
   return `${pct.toFixed(digits)}%`;
 }
 
@@ -767,7 +768,7 @@ function summarizeInstitutionalRows(payload){
     summaryParts.push(`共有 ${summaryMeta.investorsHolding} 家機構持有`);
   }
   if(summaryMeta?.ownershipPercent!=null){
-    summaryParts.push(`持股比重約 ${formatPercent(summaryMeta.ownershipPercent,1)}`);
+    summaryParts.push(`持股比重約 ${formatPercent(summaryMeta.ownershipPercent,2,{ alreadyPercent:true })}`);
   }
   if(Number.isFinite(summaryMeta?.totalInvested)){
     summaryParts.push(`總投資 ${formatMillions(summaryMeta.totalInvested)}`);

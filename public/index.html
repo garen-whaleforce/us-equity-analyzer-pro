@@ -186,6 +186,13 @@ canvas{background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:10
       2. 上傳後工作列會變成跑動球並顯示「批次分析中」。<br/>
       3. 完成後自動觸發下載，並可在 JSON 區查看完整結果。
     </div>
+    <div class="summary muted" style="margin-top:12px">
+      <strong>手動輸入：</strong>可直接輸入多檔 ticker（以分號「;」或換行分隔），日期沿用上方 Date 欄位（預設今日），模式依下拉選單。
+    </div>
+    <div class="batch-card-action" style="margin-top:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <input id="batchTickers" placeholder="AAPL;MSFT;NVDA" style="flex:1;min-width:240px"/>
+      <button id="batchManualBtn" style="width:auto;min-width:140px">用清單開始</button>
+    </div>
     <div class="batch-card-action" style="margin-top:12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
       <input type="file" id="batchFile" accept=".xlsx,.xls,.csv" hidden>
       <div style="flex:1;min-width:220px;max-width:280px">
@@ -792,7 +799,7 @@ function renderInstitutional(data){
     }
     if(metrics.ownership_percent!=null){
       const pct = Number(metrics.ownership_percent);
-      const pctText = Number.isFinite(pct) ? `${pct.toFixed(1)}%` : `${metrics.ownership_percent}%`;
+      const pctText = Number.isFinite(pct) ? `${pct.toFixed(2)}%` : `${metrics.ownership_percent}%`;
       appendLine(instDetailEl, `• 機構持股：${pctText}`, 'muted');
     }
     if(metrics.investors_holding!=null){
@@ -1024,6 +1031,9 @@ const analyzeLabel = goBtn?.textContent || '分析';
 const modelSelect = document.getElementById('model');
 const modeSelect = document.getElementById('mode');
 const batchModeSelect = document.getElementById('batchMode');
+const batchTickersInput = document.getElementById('batchTickers');
+const batchManualBtn = document.getElementById('batchManualBtn');
+const batchManualLabel = batchManualBtn?.textContent || '用清單開始';
 const dateInputEl = document.getElementById('d');
 if(dateInputEl){
   const todayStr = dayjs().format('YYYY-MM-DD');
@@ -1233,14 +1243,13 @@ const batchCardBtn = document.getElementById('batchCardBtn');
 const batchRunning = document.getElementById('batchRunning');
 
 function setBatchState(running){
-  if(!batchCardBtn || !batchRunning) return;
-  if(running){
-    batchCardBtn.style.display = 'none';
-    batchRunning.style.display = 'flex';
-  }else{
-    batchCardBtn.style.display = 'inline-flex';
-    batchRunning.style.display = 'none';
+  if(batchCardBtn) batchCardBtn.style.display = running ? 'none' : 'inline-flex';
+  if(batchManualBtn){
+    batchManualBtn.disabled = running;
+    batchManualBtn.textContent = running ? '批次執行中...' : batchManualLabel;
   }
+  if(batchTickersInput) batchTickersInput.disabled = running;
+  if(batchRunning) batchRunning.style.display = running ? 'flex' : 'none';
 }
 setBatchState(false);
 
@@ -1273,12 +1282,40 @@ async function handleBatchUpload(file){
   }
 }
 
+function buildManualBatchFile(){
+  const raw = (batchTickersInput?.value || '').trim();
+  const tokens = raw.split(/[;；,\s]+/).map(t=>t.trim()).filter(Boolean);
+  const tickers = Array.from(new Set(tokens.map(t=>t.toUpperCase())));
+  if(!tickers.length){
+    alert('請輸入至少一檔 ticker（以分號 ; 分隔）');
+    return null;
+  }
+  const { date } = collectInputParams();
+  if(!date){
+    alert('請先填入日期（會套用到所有 ticker）');
+    return null;
+  }
+  const csvLines = ['ticker,date', ...tickers.map(t=>`${t},${date}`)];
+  const blob = new Blob([csvLines.join('\n')], { type:'text/csv' });
+  if(typeof File !== 'undefined'){
+    return new File([blob], 'manual_batch.csv', { type:'text/csv' });
+  }
+  blob.name = 'manual_batch.csv';
+  return blob;
+}
+
 if(batchCardBtn) batchCardBtn.addEventListener('click', ()=> batchFile.click());
 batchFile.addEventListener('change', ()=>{
   const file = batchFile.files[0];
   if(file) handleBatchUpload(file);
   batchFile.value = '';
 });
+if(batchManualBtn){
+  batchManualBtn.addEventListener('click', ()=>{
+    const manualFile = buildManualBatchFile();
+    if(manualFile) handleBatchUpload(manualFile);
+  });
+}
 const pdfBtn = document.getElementById('downloadPdf');
 if(pdfBtn){ pdfBtn.addEventListener('click', ()=> window.print()); }
 </script>
