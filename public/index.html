@@ -6,7 +6,9 @@
 <title>美股個股分析</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/dayjs@1/dayjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dayjs@1/dayjs.min.js">const pdfBtn = document.getElementById('downloadPdf');
+if(pdfBtn){ pdfBtn.addEventListener('click', ()=> window.print()); }
+</script>
 <style>
 :root{--bg:#0b0e14;--card:#121826;--muted:#94a3b8;--text:#e2e8f0;--accent:#60a5fa;--ok:#22c55e;--warn:#f59e0b;--bad:#ef4444;}
 *{box-sizing:border-box}
@@ -54,12 +56,25 @@ canvas{background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:10
 @media(max-width:1000px){.grid,.row,.kpis{grid-template-columns:1fr}}
 @keyframes pulse{0%{transform:scale(.7);opacity:.7}50%{transform:scale(1.3);opacity:1}100%{transform:scale(.7);opacity:.7}}
 @keyframes pulse-ball{0%{transform:translateY(0)}50%{transform:translateY(-5px)}100%{transform:translateY(0)}}
+
+.no-print{}
+@media print{
+  body{background:#fff;color:#000;padding:0}
+  .card{box-shadow:none;border:1px solid #ddd;background:#fff;color:#000}
+  .no-print{display:none !important}
+  input,button,select{display:none !important}
+  .status-row{display:none !important}
+  .kpi{background:#fff;border-color:#ddd}
+  .summary{color:#000}
+}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>美股個股分析</h1>
-  <p class="muted">輸入股票代號與日期（預設使用 OpenAI gpt-5，可切換為快速/僅快取模式），系統會優先以 FMP 快取現價與歷史價，再結合 SEC 財報、FMP+Finnhub 新聞情緒、動能/趨勢與體質評分，輸出 ChatGPT 總結、重大重點與批次報表。</p>
+  <div>
+    <h1 style="margin:0 0 6px">美股個股分析</h1>
+    <p class="muted" style="margin:0">輸入股票代號與日期（預設使用 OpenAI gpt-5，可切換為快速/僅快取模式），系統會優先以 FMP 快取現價與歷史價，再結合 SEC 財報、FMP+Finnhub 新聞情緒、動能/趨勢與體質評分，輸出 ChatGPT 總結、重大重點與批次報表。</p>
+  </div>
   <div class="card">
     <div class="row">
       <div><label>Ticker</label><input id="t" value="NVDA" placeholder="NVDA"/></div>
@@ -83,7 +98,8 @@ canvas{background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:10
       <div style="align-self:end"><button id="go">分析</button></div>
       <div style="grid-column:1 / -1">
         <div class="status-row">
-          <div id="status" class="status-pill" data-state="idle">待命中，請輸入條件後開始分析。</div>
+          <div id="status" class="status-pill" data-state="idle">待命中，請輸入條件後開始分析。          <button id="downloadPdf" class="ghost-btn">下載 PDF</button>
+        </div>
           <button id="stop" class="ghost-btn">停止</button>
           <button id="refreshCache" class="ghost-btn" disabled>重新抓取</button>
         </div>
@@ -154,12 +170,12 @@ canvas{background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:10
     <div id="callDetail" class="summary" style="margin-top:8px"></div>
   </div>
 
-  <div class="card" style="margin-top:16px">
+  <div class="card no-print" style="margin-top:16px">
     <h3 style="margin:0 0 8px">分析紀錄</h3>
     <div id="historyList" class="summary muted">尚無分析紀錄</div>
   </div>
 
-  <div class="card" style="margin-top:16px">
+  <div class="card no-print" style="margin-top:16px">
     <h3 style="margin:0 0 8px">批次分析</h3>
     <div class="summary muted" style="margin-bottom:12px">
       利用下方工作列上傳 Excel/CSV（第一欄 ticker、第二欄 date，舊版第三欄 model 可留空），系統會逐行呼叫分析並下載包含現價、ChatGPT 目標價、建議、類型、體質分數、新聞情緒、動能分數、趨勢燈號、13F 信號與 Earnings Call 摘要的 CSV。
@@ -188,7 +204,7 @@ canvas{background:#0b1220;border:1px solid #1f2937;border-radius:12px;padding:10
     </div>
   </div>
 
-  <div class="card" style="margin-top:16px">
+  <div class="card no-print" style="margin-top:16px">
     <h3 style="margin:0 0 8px">詳細 JSON（除錯用）</h3>
     <pre id="out">尚未查詢</pre>
   </div>
@@ -1262,6 +1278,8 @@ batchFile.addEventListener('change', ()=>{
   if(file) handleBatchUpload(file);
   batchFile.value = '';
 });
+const pdfBtn = document.getElementById('downloadPdf');
+if(pdfBtn){ pdfBtn.addEventListener('click', ()=> window.print()); }
 </script>
 </body>
 </html>
