@@ -774,11 +774,11 @@ function renderInstitutional(data){
   if(top.length){
     appendLine(instDetailEl, '前五大機構', '');
     top.forEach(holder=>{
-      const weightText = holder.weight!=null ? formatPct(holder.weight) : '';
+      const pctText = holder.actual_pct!=null ? formatPct(holder.actual_pct) : (holder.weight!=null ? formatPct(holder.weight) : '');
       const changeText = holder.change_shares ? `，變動 ${formatMillions(holder.change_shares)} 股` : '';
       appendLine(
         instDetailEl,
-        `• ${holder.name || '機構'}：${formatMillions(holder.value)} ${weightText?`（${weightText}）`:''}${changeText}`,
+        `• ${holder.name || '機構'}：${formatMillions(holder.value)} ${pctText?`（${pctText}）`:''}${changeText}`,
         'muted'
       );
     });

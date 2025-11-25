@@ -740,12 +740,15 @@ function summarizeInstitutionalRows(payload){
         .filter(Boolean)
     : [];
   normalized.sort((a,b)=> (b.value || 0) - (a.value || 0));
+  const outstanding = Number(summaryMeta?.numberOf13Fshares);
+  const hasOutstanding = Number.isFinite(outstanding) && outstanding > 0;
   const top = normalized.slice(0,5).map(item=>({
     name: item.name,
     value: item.value,
     weight: item.weight,
     change_shares: item.changeShares,
-    change_percent: item.changePercent
+    change_percent: item.changePercent,
+    actual_pct: hasOutstanding && item.shares!=null ? item.shares / outstanding : null
   }));
   const netSharesFromRows = normalized.reduce((sum,item)=> sum + (item.changeShares || 0), 0);
   const netShares = Number.isFinite(Number(summaryMeta?.numberOf13FsharesChange))
@@ -770,8 +773,10 @@ function summarizeInstitutionalRows(payload){
     summaryParts.push(`總投資 ${formatMillions(summaryMeta.totalInvested)}`);
   }
   if(top[0]){
+    const topActual = top[0].actual_pct!=null ? formatPercent(top[0].actual_pct,1) : '';
     const topWeight = top[0].weight!=null ? formatPercent(top[0].weight,1) : '';
-    summaryParts.push(`${top[0].name} 約 ${formatMillions(top[0].value)} ${topWeight?`(${topWeight})`:''}`);
+    const topPct = topActual || topWeight;
+    summaryParts.push(`${top[0].name} 約 ${formatMillions(top[0].value)} ${topPct?`(${topPct})`:''}`);
   }
   const metaStats = summaryMeta ? {
     investors_holding: summaryMeta.investorsHolding,
