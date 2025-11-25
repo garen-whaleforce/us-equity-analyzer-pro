@@ -775,14 +775,20 @@ function summarizeInstitutionalRows(payload){
   normalized.sort((a,b)=> (b.value || 0) - (a.value || 0));
   const outstanding = Number(summaryMeta?.numberOf13Fshares);
   const hasOutstanding = Number.isFinite(outstanding) && outstanding > 0;
+  const ownershipPercent = Number(summaryMeta?.ownershipPercent);
+  const totalSharesEst = hasOutstanding && Number.isFinite(ownershipPercent) && ownershipPercent > 0
+    ? outstanding / (ownershipPercent / 100)
+    : null;
   const top = normalized.slice(0,5).map(item=>({
     name: item.name,
     value: item.value,
     weight: item.weight,
     change_shares: item.changeShares,
     change_percent: item.changePercent,
-    actual_pct: hasOutstanding && item.shares!=null
-      ? item.shares / outstanding
+    // company_pct = 佔公司總股本；inst_pct = 佔機構持股總量
+    inst_pct: hasOutstanding && item.shares!=null ? item.shares / outstanding : null,
+    actual_pct: (item.shares!=null && totalSharesEst)
+      ? item.shares / totalSharesEst
       : (Number.isFinite(item.ownership) ? item.ownership / 100 : null)
   }));
   const netSharesFromRows = normalized.reduce((sum,item)=> sum + (item.changeShares || 0), 0);
