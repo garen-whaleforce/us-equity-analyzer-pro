@@ -725,14 +725,16 @@ function summarizeInstitutionalRows(payload){
           const weightRaw = Number(row.weightPercentage ?? row.weightPercent ?? row.weight ?? row.portfolioPercent);
           // FMP 的欄位名稱已經表明百分比，統一視為百分比數字（0-100），轉成 0-1 比例
           const weight = Number.isFinite(weightRaw) ? (weightRaw / 100) : null;
+          const shares = Number(row.shares ?? row.share ?? row.sharesNumber ?? row.shares_number);
+          const ownership = Number(row.ownership ?? row.ownershipPercent ?? row.ownership_percent);
           const changeShares = Number(row.change ?? row.changeInShares ?? row.changeShares ?? row.change_shares);
           const reportDate = row.dateReported || row.latestQuarter || row.period || row.date;
           const changePercent = Number(row.changePercent ?? row.changePercentage);
-          const shares = Number(row.shares ?? row.share);
           return {
             name,
             value: Number.isFinite(value) ? value : null,
             weight,
+            ownership: Number.isFinite(ownership) ? ownership : null,
             changeShares: Number.isFinite(changeShares) ? changeShares : 0,
             changePercent: Number.isFinite(changePercent) ? changePercent : null,
             reportDate,
@@ -750,7 +752,9 @@ function summarizeInstitutionalRows(payload){
     weight: item.weight,
     change_shares: item.changeShares,
     change_percent: item.changePercent,
-    actual_pct: hasOutstanding && item.shares!=null ? item.shares / outstanding : null
+    actual_pct: hasOutstanding && item.shares!=null
+      ? item.shares / outstanding
+      : (Number.isFinite(item.ownership) ? item.ownership / 100 : null)
   }));
   const netSharesFromRows = normalized.reduce((sum,item)=> sum + (item.changeShares || 0), 0);
   const netShares = Number.isFinite(Number(summaryMeta?.numberOf13FsharesChange))
